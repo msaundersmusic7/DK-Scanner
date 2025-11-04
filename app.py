@@ -88,7 +88,7 @@ def get_full_album_details(album_ids, token):
     if not album_ids:
         return []
         
-    # *** THIS IS THE CORRECTED URL (was 'https' before) ***
+    # *** THIS IS THE CORRECTED URL (was 'https' or other bad values before) ***
     albums_url = 'https://api.spotify.com/v1/albums' 
     
     full_album_list = []
