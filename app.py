@@ -1,6 +1,9 @@
 import os
 import base64
 import time
+import random
+import string
+import re
 from flask import Flask, jsonify, make_response
 from flask_cors import CORS
 import requests
@@ -20,6 +23,15 @@ logging.basicConfig(level=logging.DEBUG)
 # Load credentials securely from environment variables
 CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
+
+# --- ** NEW: Regex filter for P-Line ** ---
+# This will match "℗ 2024 123456 Records DK" or "℗ 2024 DistroKid"
+# It looks for (P) or ℗, then any year, then (optional numbers + "records dk") OR "distrokid"
+# This is much stricter and will filter out major labels.
+P_LINE_REGEX = re.compile(
+    r"(\(p\)|\℗)\s*\d{4}\s*.*(\d+\s*records\s*dk|distrokid)",
+    re.IGNORECASE
+)
 
 # --- Helper Function: Get Access Token ---
 def get_spotify_token():
@@ -88,7 +100,6 @@ def get_full_album_details(album_ids, token):
     if not album_ids:
         return []
         
-    # *** THIS IS THE CORRECTED URL (was 'https' or other bad values before) ***
     albums_url = 'https://api.spotify.com/v1/albums' 
     
     full_album_list = []
@@ -126,6 +137,46 @@ def get_full_album_details(album_ids, token):
     return full_album_list
 
 
+# --- ** NEW: Helper Function to Get Artist Details ** ---
+def get_artist_details(artist_ids, token):
+    """
+    Fetches full artist details (followers, popularity) for a list of artist IDs.
+    """
+    if not artist_ids:
+        return []
+
+    artists_url = 'https://api.spotify.com/v1/artists'
+    auth_header = {"Authorization": f"Bearer {token}"}
+    
+    artist_details_list = []
+
+    # Split artist_ids into chunks of 50 (Spotify's max for this endpoint)
+    for i in range(0, len(artist_ids), 50):
+        chunk = artist_ids[i:i + 50]
+        params = {'ids': ','.join(chunk)}
+        
+        try:
+            response = requests.get(artists_url, headers=auth_header, params=params)
+            
+            if response.status_code == 429:
+                retry_after = int(response.headers.get('Retry-After', 10))
+                app.logger.warning(f"Rate limited getting artist details. Waiting {retry_after}s...")
+                time.sleep(retry_after)
+                # Re-run this chunk
+                response = requests.get(artists_url, headers=auth_header, params=params)
+
+            response.raise_for_status()
+            data = response.json()
+            artist_details_list.extend(data.get('artists', []))
+        
+        except requests.exceptions.HTTPError as err:
+            app.logger.error(f"HTTP error getting artist details: {err}")
+        except Exception as e:
+            app.logger.error(f"Unexpected error in get_artist_details: {e}")
+
+    return artist_details_list
+
+
 # --- Main API Route: /api/scan ---
 @app.route('/api/scan')
 def scan_for_artists():
@@ -140,7 +191,7 @@ def scan_for_artists():
         return jsonify({"error": "Authentication failed. Server credentials may be missing."}), 500
 
     app.logger.info("Authentication successful. Starting server-side scan...")
-    artists_found = {} # Use a dictionary to store {name: url}
+    artists_found = {} # Use a dictionary to store {id: {name, url}}
     total_albums_scanned = 0
     
     # Start with the base search URL
@@ -150,9 +201,15 @@ def scan_for_artists():
     page_count = 0
     max_pages = 20 # Limit to 20 pages (1000 albums)
     
+    # --- ** NEW: Random wildcard search ** ---
+    # This ensures you get a new set of results each time you scan
+    wildcard = random.choice(string.ascii_lowercase)
+    query = f'label:"Records DK" %{wildcard}%' # e.g., 'label:"Records DK" %a%'
+    app.logger.info(f"Using randomized search query: {query}")
+    
     # Set initial parameters for the first request
     params = {
-        'q': 'label:"Records DK"',  # *** THE CORRECT, TARGETED SEARCH QUERY ***
+        'q': query,
         'type': 'album',
         'limit': 50,       # Get 50 albums per page
         'offset': 0
@@ -168,7 +225,6 @@ def scan_for_artists():
                 response = requests.get(search_url, headers=auth_header, params=params)
             else:
                 response = requests.get(next_url, headers=auth_header)
-
             
             if response.status_code == 429:
                 retry_after = int(response.headers.get('Retry-After', 10))
@@ -203,17 +259,22 @@ def scan_for_artists():
             for album in full_albums:
                 if not album: continue
                 for copyright in album.get('copyrights', []):
-                    copyright_text = copyright.get('text', '').lower()
+                    copyright_text = copyright.get('text', '')
                     
-                    # *** FINAL, CORRECTED FILTER ***
-                    # Check for "records dk" (as requested) OR "distrokid" in the P-line
-                    if copyright.get('type') == 'P' and ('records dk' in copyright_text or 'distrokid' in copyright_text):
+                    # --- ** NEW: Stricter Regex Filter ** ---
+                    # Check if the P-line text matches our strict pattern
+                    if copyright.get('type') == 'P' and P_LINE_REGEX.search(copyright_text):
                         for artist in album.get('artists', []):
+                            artist_id = artist.get('id')
                             artist_name = artist.get('name')
                             artist_url = artist.get('external_urls', {}).get('spotify')
-                            if artist_name and artist_name not in artists_found:
-                                artists_found[artist_name] = artist_url
-                        break # Move to the next album
+                            if artist_id and artist_name and artist_id not in artists_found:
+                                # Store by ID to prevent duplicates
+                                artists_found[artist_id] = {
+                                    "name": artist_name,
+                                    "url": artist_url
+                                }
+                        break # Found a match, move to the next album
             
             app.logger.info(f"Scanned {total_albums_scanned} albums... Found {len(artists_found)} unique artists so far.")
             
@@ -229,14 +290,33 @@ def scan_for_artists():
             app.logger.error(f"ERROR: An unexpected error occurred during search: {e}")
             return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
 
-    app.logger.info(f"Scan complete. Found {len(artists_found)} artists.")
+    # --- ** NEW: Step 4 - Get Popularity and Followers ** ---
+    if not artists_found:
+        app.logger.info("Scan complete. Found 0 artists.")
+        return jsonify({"artists": []})
+
+    app.logger.info(f"Scan complete. Found {len(artists_found)} artists. Now fetching details...")
+    artist_ids_list = list(artists_found.keys())
+    detailed_artists = get_artist_details(artist_ids_list, token)
+
+    final_artist_list = []
+    for artist_data in detailed_artists:
+        if not artist_data: continue
+        artist_id = artist_data.get('id')
+        base_info = artists_found.get(artist_id)
+        if base_info:
+            final_artist_list.append({
+                "name": base_info['name'],
+                "url": base_info['url'],
+                "followers": artist_data.get('followers', {}).get('total', 0),
+                "popularity": artist_data.get('popularity', 0)
+            })
+
+    app.logger.info("Successfully fetched all artist details.")
+    # Sort by name by default
+    final_artist_list_sorted = sorted(final_artist_list, key=lambda k: k['name'])
     
-    # Convert the dictionary to the list of objects for the frontend
-    artist_list = [{"name": name, "url": url} for name, url in artists_found.items()]
-    # Sort the list alphabetically by artist name
-    artist_list_sorted = sorted(artist_list, key=lambda k: k['name'])
-    
-    return jsonify({"artists": artist_list_sorted})
+    return jsonify({"artists": final_artist_list_sorted})
 
 # --- Frontend Route: / ---
 @app.route('/')
