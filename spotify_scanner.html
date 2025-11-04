@@ -10,7 +10,7 @@
         /* Simple loading spinner */
         .spinner {
             border: 4px solid rgba(0, 0, 0, 0.1);
-            border-left-color: #3b82f6;
+            border-left-color: #1ed760; /* Spotify Green */
             border-radius: 50%;
             width: 24px;
             height: 24px;
@@ -19,34 +19,61 @@
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
+        /* Custom scrollbar for results */
+        #results-list::-webkit-scrollbar {
+            width: 8px;
+        }
+        #results-list::-webkit-scrollbar-track {
+            background: #282828; /* Spotify dark gray */
+            border-radius: 10px;
+        }
+        #results-list::-webkit-scrollbar-thumb {
+            background: #535353; /* Spotify light gray */
+            border-radius: 10px;
+        }
+        #results-list::-webkit-scrollbar-thumb:hover {
+            background: #b3b3b3; /* Spotify hover gray */
+        }
     </style>
 </head>
-<body class="bg-gray-900 text-gray-100 font-sans p-6 min-h-screen">
+<body class="bg-black text-gray-100 font-sans p-6 min-h-screen">
     <div class="max-w-2xl mx-auto">
         
-        <h1 class="text-3xl font-bold text-center mb-2">Spotify 'DK' Label Scanner</h1>
-        <p class="text-gray-400 text-center mb-6">Finds artists on Spotify with 'DK' in their P-Line (℗), which often indicates distribution by DistroKid.</p>
+        <div class="flex items-center justify-center mb-6">
+            <!-- Spotify Logo SVG -->
+            <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#1ed760" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <path d="M4.93 4.93c7.07 7.07 7.07 18.38 0 25.45"></path>
+                <path d="M7.76 7.76c4.68 4.68 4.68 12.28 0 16.97"></path>
+                <path d="M10.59 10.59c2.34 2.34 2.34 6.14 0 8.49"></path>
+            </svg>
+            <h1 class="text-3xl font-bold text-center ml-3">Spotify 'DK' Scanner</h1>
+        </div>
+        <p class="text-gray-400 text-center mb-8">Finds artists on Spotify with 'DK' or 'DistroKid' in their P-Line (℗).</p>
 
         <!-- Step 1: Run -->
         <div class="text-center mb-6">
-            <button id="start-scan" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg shadow-md transition duration-200 flex items-center justify-center">
-                <span id="button-text">Start Scan</span>
+            <button id="start-scan" class="w-full bg-green-600 hover:bg-green-700 text-black font-bold py-3 px-6 rounded-full shadow-md transition duration-200 flex items-center justify-center">
+                <span id="button-text">Start New Scan</span>
                 <div id="loading-spinner" class="spinner ml-3 hidden"></div>
             </button>
         </div>
 
         <!-- Step 2: Results -->
-        <div id="results-container" class="bg-gray-800 p-6 rounded-lg shadow-lg hidden">
+        <div id="results-container" class="bg-gray-900 border border-gray-800 p-6 rounded-lg shadow-lg hidden">
             <div class="flex justify-between items-center mb-4">
                 <h2 class="text-xl font-semibold">Results</h2>
-                <button id="download-results" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg text-sm hidden">
+                <button id="download-results" class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-full text-sm hidden">
                     Download .txt
                 </button>
             </div>
             
             <div id="status" class="text-gray-400 mb-4">Idle. Click "Start Scan" to begin.</div>
             
-            <textarea id="results-list" class="w-full h-64 bg-gray-900 border border-gray-700 rounded-lg p-4 text-gray-200 font-mono text-sm" readonly placeholder="Found artists will appear here..."></textarea>
+            <!-- This is now a div for rich content, not a textarea -->
+            <div id="results-list" class_name="w-full h-80 bg-black border border-gray-700 rounded-lg p-4 overflow-y-auto space-y-2">
+                <p class="text-gray-500">Found artists will appear here...</p>
+            </div>
         </div>
 
     </div>
@@ -62,7 +89,7 @@
         const downloadButton = document.getElementById('download-results');
 
         // --- App State ---
-        let foundArtists = [];
+        let foundArtists = []; // This will now be an array of objects
         let isScanning = false;
 
         // --- Event Listeners ---
@@ -72,13 +99,13 @@
         async function handleStartScan() {
             if (isScanning) return;
             
-            // This is the only URL we need. It's relative to the current host.
-            const scanUrl = '/api/scan';
+            // The URL is now relative! It calls the same server it's hosted on.
+            const scanUrl = '/api/scan'; 
 
             // Reset UI for a new scan
             isScanning = true;
             foundArtists = [];
-            resultsListEl.value = "";
+            resultsListEl.innerHTML = '<p class="text-gray-500">Scanning, please wait...</p>'; // Clear old results
             resultsContainer.classList.remove('hidden');
             downloadButton.classList.add('hidden');
             loadingSpinner.classList.remove('hidden');
@@ -87,7 +114,7 @@
             startButton.classList.add('opacity-50', 'cursor-not-allowed');
 
             try {
-                updateStatus("1. Contacting server...");
+                updateStatus("Contacting server and starting scan... This may take several minutes.");
                 
                 const response = await fetch(scanUrl);
 
@@ -97,22 +124,38 @@
                 }
                 
                 const data = await response.json();
-                foundArtists = data.artists || [];
+                foundArtists = data.artists || []; // This is now a list of {name, url}
                 
                 // Finished
                 const totalFound = foundArtists.length;
-                if(totalFound > 0) {
-                    resultsListEl.value = foundArtists.join('\n');
+                
+                if (totalFound > 0) {
+                    // Build the new clickable list
+                    resultsListEl.innerHTML = ''; // Clear the "Scanning..." message
+                    foundArtists.forEach(artist => {
+                        const linkEl = document.createElement('a');
+                        linkEl.href = artist.url;
+                        linkEl.textContent = artist.name;
+                        linkEl.target = "_blank"; // Open in new tab
+                        linkEl.rel = "noopener noreferrer";
+                        linkEl.className = "block text-green-400 hover:text-green-300 hover:underline p-2 rounded-md transition duration-150";
+                        resultsListEl.appendChild(linkEl);
+                    });
+                    
                     downloadButton.classList.remove('hidden');
+                } else {
+                    resultsListEl.innerHTML = '<p class="text-gray-500">No artists were found matching the criteria.</p>';
                 }
+                
                 updateStatus(`Scan complete! Found ${totalFound} unique artists.`);
 
             } catch (error) {
                 if (error instanceof TypeError) {
-                     showError(`Network error. Cannot reach server.`);
+                     showError(`Network error. Cannot reach server. Is it running?`);
                 } else {
                     showError(error.message);
                 }
+                 resultsListEl.innerHTML = '<p class="text-red-500">An error occurred. Check status for details.</p>';
             } finally {
                 // Re-enable UI
                 isScanning = false;
@@ -124,10 +167,11 @@
         }
 
         function downloadResults() {
-            const text = foundArtists.join('\n');
+            // Format the text file to include both name and URL
+            const text = foundArtists.map(artist => `${artist.name}\t${artist.url}`).join('\n');
             const blob = new Blob([text], { type: 'text/plain' });
             const anchor = document.createElement('a');
-            anchor.download = 'distrokid_artists.txt';
+            anchor.download = 'spotify_dk_artists.txt';
             anchor.href = window.URL.createObjectURL(blob);
             anchor.click();
             window.URL.revokeObjectURL(anchor.href);
@@ -153,4 +197,3 @@
     </script>
 </body>
 </html>
-

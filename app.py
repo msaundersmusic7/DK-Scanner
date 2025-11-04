@@ -140,7 +140,7 @@ def scan_for_artists():
         return jsonify({"error": "Authentication failed. Server credentials may be missing."}), 500
 
     app.logger.info("Authentication successful. Starting server-side scan...")
-    artists_found = set()
+    artists_found = {} # Use a dictionary to store {name: url}
     total_albums_scanned = 0
     
     # Start with the base search URL
@@ -209,10 +209,13 @@ def scan_for_artists():
                     # Check for "records dk" (as requested) OR "distrokid" in the P-line
                     if copyright.get('type') == 'P' and ('records dk' in copyright_text or 'distrokid' in copyright_text):
                         for artist in album.get('artists', []):
-                            artists_found.add(artist.get('name'))
+                            artist_name = artist.get('name')
+                            artist_url = artist.get('external_urls', {}).get('spotify')
+                            if artist_name and artist_name not in artists_found:
+                                artists_found[artist_name] = artist_url
                         break # Move to the next album
             
-            app.logger.info(f"Scanned {total_albums_scanned} albums... Found {len(artists_found)} artists so far.")
+            app.logger.info(f"Scanned {total_albums_scanned} albums... Found {len(artists_found)} unique artists so far.")
             
             # Get the URL for the next page of results
             next_url = data.get('albums', {}).get('next')
@@ -227,7 +230,13 @@ def scan_for_artists():
             return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
 
     app.logger.info(f"Scan complete. Found {len(artists_found)} artists.")
-    return jsonify({"artists": sorted(list(artists_found))})
+    
+    # Convert the dictionary to the list of objects for the frontend
+    artist_list = [{"name": name, "url": url} for name, url in artists_found.items()]
+    # Sort the list alphabetically by artist name
+    artist_list_sorted = sorted(artist_list, key=lambda k: k['name'])
+    
+    return jsonify({"artists": artist_list_sorted})
 
 # --- Frontend Route: / ---
 @app.route('/')
