@@ -24,6 +24,17 @@ logging.basicConfig(level=logging.DEBUG)
 CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
+# --- ** NEW: Stricter Regex filter for P-Line ** ---
+# This looks for one or more digits (\d+), followed by a space (\s+),
+# followed by "records dk". This is the strict pattern we need.
+P_LINE_REGEX = re.compile(r"\d+\s+records\s+dk", re.IGNORECASE)
+
+# --- ** NEW: Follower Threshold ** ---
+# We will filter out any artist with more than this many followers.
+# This removes "false positives" like Bach or major label artists.
+MAX_FOLLOWERS = 500000
+
+
 # --- Helper Function: Get Access Token ---
 def get_spotify_token():
     """
@@ -189,14 +200,15 @@ def scan_for_artists():
     page_count = 0
     max_pages = 20 # Limit to 20 pages (1000 albums)
     
-    # --- ** NEW: Random Offset Search ** ---
-    # This ensures you get a new set of results each time you scan
+    # --- ** FINAL CORRECTED SEARCH LOGIC ** ---
     
     # 1. First, do a dummy search to find the total number of results
     total_results = 1000 # Default to 1000
+    
+    # *** THIS IS THE CORRECT, TARGETED QUERY ***
+    search_query = 'label:"Records DK"' 
+    
     try:
-        # *** NEW: Broad query for new, random indie music ***
-        search_query = f"tag:new %{random.choice(string.ascii_lowercase)}%"
         dummy_params = {'q': search_query, 'type': 'album', 'limit': 1}
         dummy_response = requests.get(search_url, headers=auth_header, params=dummy_params)
         dummy_response.raise_for_status()
@@ -266,12 +278,11 @@ def scan_for_artists():
             for album in full_albums:
                 if not album: continue
                 for copyright in album.get('copyrights', []):
-                    copyright_text = copyright.get('text', '').lower()
+                    copyright_text = copyright.get('text', '') # No .lower() needed for regex
                     
-                    # --- ** FINAL, CORRECTED FILTER (Fixes "Bach" & "EsDeeKid") ** ---
-                    # We look for "records dk" OR "distrokid"
-                    # This is the simple, robust filter that will work.
-                    if copyright.get('type') == 'P' and ('records dk' in copyright_text or 'distrokid' in copyright_text):
+                    # --- ** FINAL, STRICT REGEX FILTER (Fixes "EsDeeKid Problem") ** ---
+                    # We ONLY look for the pattern "[Numbers] Records DK"
+                    if copyright.get('type') == 'P' and P_LINE_REGEX.search(copyright_text):
                         for artist in album.get('artists', []):
                             artist_id = artist.get('id')
                             artist_name = artist.get('name')
@@ -321,8 +332,19 @@ def scan_for_artists():
             })
 
     app.logger.info("Successfully fetched all artist details.")
+    
+    # --- ** NEW: Step 5 - Filter out "Bach Problem" ** ---
+    filtered_artist_list = []
+    for artist in final_artist_list:
+        if artist['followers'] < MAX_FOLLOWERS:
+            filtered_artist_list.append(artist)
+        else:
+            app.logger.info(f"Filtering out artist: {artist['name']} (Followers: {artist['followers']})")
+            
+    app.logger.info(f"Returning {len(filtered_artist_list)} artists after filtering.")
+    
     # Sort by name by default
-    final_artist_list_sorted = sorted(final_artist_list, key=lambda k: k['name'])
+    final_artist_list_sorted = sorted(filtered_artist_list, key=lambda k: k['name'])
     
     return jsonify({"artists": final_artist_list_sorted})
 
