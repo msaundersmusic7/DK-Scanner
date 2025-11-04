@@ -132,7 +132,7 @@ def scan_for_artists():
     
     # Set initial parameters for the first request
     params = {
-        'q': 'distrokid',  # Broad search query
+        'q': '"Records DK"',  # *** NEW, MORE SPECIFIC SEARCH QUERY ***
         'type': 'album',
         'limit': 50,       # Get 50 albums per page
         'offset': 0
@@ -185,8 +185,9 @@ def scan_for_artists():
                 for copyright in album.get('copyrights', []):
                     copyright_text = copyright.get('text', '').lower()
                     
-                    # Check for 'dk' OR 'distrokid' in the P-line
-                    if copyright.get('type') == 'P' and ('dk' in copyright_text or 'distrokid' in copyright_text):
+                    # *** FINAL, CORRECTED FILTER ***
+                    # Check for "records dk" (as requested) OR "distrokid" in the P-line
+                    if copyright.get('type') == 'P' and ('records dk' in copyright_text or 'distrokid' in copyright_text):
                         for artist in album.get('artists', []):
                             artists_found.add(artist.get('name'))
                         break # Move to the next album
