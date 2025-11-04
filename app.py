@@ -24,15 +24,6 @@ logging.basicConfig(level=logging.DEBUG)
 CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
-# --- ** NEW: Regex filter for P-Line ** ---
-# This will match "℗ 2024 123456 Records DK" or "℗ 2024 DistroKid"
-# It looks for (P) or ℗, then any year, then (optional numbers + "records dk") OR "distrokid"
-# This is much stricter and will filter out major labels.
-P_LINE_REGEX = re.compile(
-    r"(\(p\)|\℗)\s*\d{4}\s*.*(\d+\s*records\s*dk|distrokid)",
-    re.IGNORECASE
-)
-
 # --- Helper Function: Get Access Token ---
 def get_spotify_token():
     """
@@ -259,11 +250,11 @@ def scan_for_artists():
             for album in full_albums:
                 if not album: continue
                 for copyright in album.get('copyrights', []):
-                    copyright_text = copyright.get('text', '')
+                    copyright_text = copyright.get('text', '').lower()
                     
-                    # --- ** NEW: Stricter Regex Filter ** ---
-                    # Check if the P-line text matches our strict pattern
-                    if copyright.get('type') == 'P' and P_LINE_REGEX.search(copyright_text):
+                    # --- ** NEW: Simplified and Corrected Filter ** ---
+                    # This removes the broken regex and uses a simple check
+                    if copyright.get('type') == 'P' and ('records dk' in copyright_text or 'distrokid' in copyright_text):
                         for artist in album.get('artists', []):
                             artist_id = artist.get('id')
                             artist_name = artist.get('name')
