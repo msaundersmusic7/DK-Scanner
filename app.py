@@ -24,6 +24,11 @@ logging.basicConfig(level=logging.DEBUG)
 CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
+# --- ** NEW: Stricter Regex filter for P-Line ** ---
+# This looks for one or more digits (\d+), followed by a space (\s+),
+# followed by "records dk". This is the strict pattern we need.
+P_LINE_REGEX = re.compile(r"\d+\s+records\s+dk", re.IGNORECASE)
+
 # --- Helper Function: Get Access Token ---
 def get_spotify_token():
     """
@@ -193,7 +198,9 @@ def scan_for_artists():
     
     # 1. First, do a dummy search to find the total number of results
     total_results = 1000 # Default to 1000
-    search_query = 'label:"Records DK"' # This is the correct, targeted query
+    
+    # *** THIS IS THE CORRECT, TARGETED QUERY ***
+    search_query = 'label:"Records DK"' 
     
     try:
         dummy_params = {'q': search_query, 'type': 'album', 'limit': 1}
@@ -265,11 +272,11 @@ def scan_for_artists():
             for album in full_albums:
                 if not album: continue
                 for copyright in album.get('copyrights', []):
-                    copyright_text = copyright.get('text', '').lower()
+                    copyright_text = copyright.get('text', '') # No .lower() needed for regex
                     
-                    # --- ** FINAL, STRICT FILTER (Fixes "Bach Problem") ** ---
-                    # We ONLY look for "records dk". This is the fix.
-                    if copyright.get('type') == 'P' and 'records dk' in copyright_text:
+                    # --- ** FINAL, STRICT REGEX FILTER (Fixes "EsDeeKid Problem") ** ---
+                    # We ONLY look for the pattern "[Numbers] Records DK"
+                    if copyright.get('type') == 'P' and P_LINE_REGEX.search(copyright_text):
                         for artist in album.get('artists', []):
                             artist_id = artist.get('id')
                             artist_name = artist.get('name')
@@ -344,6 +351,5 @@ def serve_frontend():
 if __name__ == '__main__':
     # Gunicorn (which Render uses) will not run this block.
     # This is only for local testing.
-    #
-    # *** THIS IS THE CORRECTED LINE ***
     app.run(debug=True, port=5000)
+
