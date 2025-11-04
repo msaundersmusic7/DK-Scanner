@@ -189,14 +189,13 @@ def scan_for_artists():
     page_count = 0
     max_pages = 20 # Limit to 20 pages (1000 albums)
     
-    # --- ** NEW: Random Offset Search ** ---
-    # This ensures you get a new set of results each time you scan
+    # --- ** FINAL CORRECTED SEARCH LOGIC ** ---
     
     # 1. First, do a dummy search to find the total number of results
     total_results = 1000 # Default to 1000
+    search_query = 'label:"Records DK"' # This is the correct, targeted query
+    
     try:
-        # *** NEW: Broad query for new, random indie music ***
-        search_query = f"tag:new %{random.choice(string.ascii_lowercase)}%"
         dummy_params = {'q': search_query, 'type': 'album', 'limit': 1}
         dummy_response = requests.get(search_url, headers=auth_header, params=dummy_params)
         dummy_response.raise_for_status()
@@ -268,7 +267,7 @@ def scan_for_artists():
                 for copyright in album.get('copyrights', []):
                     copyright_text = copyright.get('text', '').lower()
                     
-                    # --- ** NEW: Stricter Filter (Fixes "Bach Problem") ** ---
+                    # --- ** FINAL, STRICT FILTER (Fixes "Bach Problem") ** ---
                     # We ONLY look for "records dk". This is the fix.
                     if copyright.get('type') == 'P' and 'records dk' in copyright_text:
                         for artist in album.get('artists', []):
@@ -345,5 +344,4 @@ def serve_frontend():
 if __name__ == '__main__':
     # Gunicorn (which Render uses) will not run this block.
     # This is only for local testing.
-    app.run(debug=True, port=5000)
-
+    app.run(debug: True, port: 5000)
