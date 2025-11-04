@@ -24,7 +24,6 @@ logging.basicConfig(level=logging.DEBUG)
 CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
-
 # --- ** NEW: Follower Threshold ** ---
 # We will filter out any artist with more than this many followers.
 # This removes "false positives" like Rovalio, EsDeeKid, and Bach.
@@ -201,8 +200,8 @@ def scan_for_artists():
     # 1. First, do a dummy search to find the total number of results
     total_results = 1000 # Default to 1000
     
-    # *** THIS IS THE CORRECT, BROAD QUERY ***
-    search_query = f"tag:new %{random.choice(string.ascii_lowercase)}%"
+    # *** THIS IS THE NEW, BROAD, RELEVANT QUERY ***
+    search_query = 'distrokid' 
     
     try:
         dummy_params = {'q': search_query, 'type': 'album', 'limit': 1}
