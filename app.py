@@ -344,4 +344,6 @@ def serve_frontend():
 if __name__ == '__main__':
     # Gunicorn (which Render uses) will not run this block.
     # This is only for local testing.
-    app.run(debug: True, port: 5000)
+    #
+    # *** THIS IS THE CORRECTED LINE ***
+    app.run(debug=True, port=5000)
