@@ -195,24 +195,28 @@ def scan_for_artists():
     # 1. First, do a dummy search to find the total number of results
     total_results = 1000 # Default to 1000
     try:
-        dummy_params = {'q': 'label:"Records DK"', 'type': 'album', 'limit': 1}
+        # *** NEW: Broad query for new, random indie music ***
+        search_query = f"tag:new %{random.choice(string.ascii_lowercase)}%"
+        dummy_params = {'q': search_query, 'type': 'album', 'limit': 1}
         dummy_response = requests.get(search_url, headers=auth_header, params=dummy_params)
         dummy_response.raise_for_status()
         total_results = dummy_response.json().get('albums', {}).get('total', 1000)
         # Spotify's max offset is 1000 (or 2000 results). We will cap it at 950 to be safe.
-        app.logger.info(f"Total results for query: {total_results}")
+        app.logger.info(f"Total results for query '{search_query}': {total_results}")
     except Exception as e:
         app.logger.error(f"Error getting total results: {e}")
         
     # 2. Pick a random starting point (offset)
     # Max offset is 950 (page 20 * 50 albums/page = 1000 results limit)
     max_possible_offset = min(total_results, 950) 
-    random_offset = random.randint(0, max_possible_offset // 50) * 50
+    random_offset = 0
+    if max_possible_offset > 50:
+         random_offset = random.randint(0, max_possible_offset // 50) * 50
     app.logger.info(f"Starting scan at random offset: {random_offset}")
 
     # Set initial parameters for the first request
     params = {
-        'q': 'label:"Records DK"',  # This is still the best query
+        'q': search_query,
         'type': 'album',
         'limit': 50,       
         'offset': random_offset
@@ -265,7 +269,7 @@ def scan_for_artists():
                     copyright_text = copyright.get('text', '').lower()
                     
                     # --- ** NEW: Stricter Filter (Fixes "Bach Problem") ** ---
-                    # We ONLY look for "records dk". We REMOVED "or 'distrokid'"
+                    # We ONLY look for "records dk". This is the fix.
                     if copyright.get('type') == 'P' and 'records dk' in copyright_text:
                         for artist in album.get('artists', []):
                             artist_id = artist.get('id')
@@ -342,3 +346,4 @@ if __name__ == '__main__':
     # Gunicorn (which Render uses) will not run this block.
     # This is only for local testing.
     app.run(debug=True, port=5000)
+
