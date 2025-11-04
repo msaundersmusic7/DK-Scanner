@@ -24,15 +24,11 @@ logging.basicConfig(level=logging.DEBUG)
 CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
-# --- ** NEW: Stricter Regex filter for P-Line ** ---
-# This looks for one or more digits (\d+), followed by a space (\s+),
-# followed by "records dk". This is the strict pattern we need.
-P_LINE_REGEX = re.compile(r"\d+\s+records\s+dk", re.IGNORECASE)
 
 # --- ** NEW: Follower Threshold ** ---
 # We will filter out any artist with more than this many followers.
-# This removes "false positives" like Bach or major label artists.
-MAX_FOLLOWERS = 500000
+# This removes "false positives" like Rovalio, EsDeeKid, and Bach.
+MAX_FOLLOWERS = 100000
 
 
 # --- Helper Function: Get Access Token ---
@@ -205,8 +201,8 @@ def scan_for_artists():
     # 1. First, do a dummy search to find the total number of results
     total_results = 1000 # Default to 1000
     
-    # *** THIS IS THE CORRECT, TARGETED QUERY ***
-    search_query = 'label:"Records DK"' 
+    # *** THIS IS THE CORRECT, BROAD QUERY ***
+    search_query = f"tag:new %{random.choice(string.ascii_lowercase)}%"
     
     try:
         dummy_params = {'q': search_query, 'type': 'album', 'limit': 1}
@@ -278,11 +274,11 @@ def scan_for_artists():
             for album in full_albums:
                 if not album: continue
                 for copyright in album.get('copyrights', []):
-                    copyright_text = copyright.get('text', '') # No .lower() needed for regex
+                    copyright_text = copyright.get('text', '').lower()
                     
-                    # --- ** FINAL, STRICT REGEX FILTER (Fixes "EsDeeKid Problem") ** ---
-                    # We ONLY look for the pattern "[Numbers] Records DK"
-                    if copyright.get('type') == 'P' and P_LINE_REGEX.search(copyright_text):
+                    # --- ** FINAL, STRICT FILTER (Fixes "Bach" & "Rovalio") ** ---
+                    # We ONLY look for "records dk". This is the fix.
+                    if copyright.get('type') == 'P' and 'records dk' in copyright_text:
                         for artist in album.get('artists', []):
                             artist_id = artist.get('id')
                             artist_name = artist.get('name')
