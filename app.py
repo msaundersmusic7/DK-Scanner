@@ -44,6 +44,7 @@ def get_spotify_token():
         app.logger.error("CRITICAL: Missing SPOTIFY_CLIENT_ID or SPOTIFY_CLIENT_SECRET environment variables.")
         return None
 
+    # *** THIS IS THE CORRECT URL ***
     auth_url = 'https://accounts.spotify.com/api/token'
     
     # Base64 encode the Client ID and Secret
@@ -77,6 +78,34 @@ def get_spotify_token():
         app.logger.error(f"An unexpected error occurred during authentication: {e}")
         return None
 
+# --- Helper Function: Get Full Album Details ---
+def get_full_album_details(album_ids, token):
+    """
+    Fetches full album details for a list of album IDs.
+    The 'search' endpoint only returns simplified objects without copyright info.
+    This function gets the full objects.
+    """
+    if not album_ids:
+        return []
+        
+    albums_url = 'https://api.spotify.com/v1/albums'
+    auth_header = {"Authorization": f"Bearer {token}"}
+    params = {
+        'ids': ','.join(album_ids) # Spotify API takes a comma-separated string of IDs
+    }
+    
+    try:
+        response = requests.get(albums_url, headers=auth_header, params=params)
+        response.raise_for_status()
+        data = response.json()
+        return data.get('albums', [])
+    except requests.exceptions.HTTPError as err:
+        app.logger.error(f"HTTP error getting full album details: {err}")
+        return []
+    except Exception as e:
+        app.logger.error(f"Unexpected error in get_full_album_details: {e}")
+        return []
+
 # --- Main API Route: /api/scan ---
 @app.route('/api/scan')
 def scan_for_artists():
@@ -94,7 +123,7 @@ def scan_for_artists():
     artists_found = set()
     total_albums_scanned = 0
     
-    # Start with the base search URL and parameters
+    # Start with the base search URL
     search_url = 'https://api.spotify.com/v1/search'
     auth_header = {"Authorization": f"Bearer {token}"}
     
@@ -103,19 +132,18 @@ def scan_for_artists():
     
     # Set initial parameters for the first request
     params = {
-        'q': '"Records DK"',  # Changed to a broader search query
+        'q': 'distrokid',  # Broad search query
         'type': 'album',
-        'limit': 50,
+        'limit': 50,       # Get 50 albums per page
         'offset': 0
     }
     
-    # We will use 'next_url' to paginate. 'search_url' will be the base.
     next_url = search_url # For the first loop
     
     while next_url and page_count < max_pages:
         try:
-            # For the first request, we pass params. For all others,
-            # we just call the 'next_url' which already has all params.
+            # 1. SEARCH FOR ALBUMS (Simplified)
+            app.logger.debug(f"Scanning page {page_count + 1}...")
             if page_count == 0:
                 response = requests.get(search_url, headers=auth_header, params=params)
             else:
@@ -130,19 +158,35 @@ def scan_for_artists():
             
             response.raise_for_status()
             data = response.json()
-            albums = data.get('albums', {}).get('items', [])
+            simplified_albums = data.get('albums', {}).get('items', [])
             
-            if not albums:
+            if not simplified_albums:
                 app.logger.info("No more albums found.")
-                break # No more results, exit the loop
+                break 
 
-            total_albums_scanned += len(albums)
+            # Collect all album IDs from this page
+            album_ids = [album['id'] for album in simplified_albums if album and album.get('id')]
+            if not album_ids:
+                app.logger.info("Found albums, but no IDs. Moving to next page.")
+                next_url = data.get('albums', {}).get('next')
+                page_count += 1
+                continue
+
+            # 2. GET FULL ALBUM DETAILS (with Copyrights)
+            app.logger.debug(f"Getting full details for {len(album_ids)} albums...")
+            full_albums = get_full_album_details(album_ids, token)
+            
+            total_albums_scanned += len(full_albums)
             page_count += 1
 
-            for album in albums:
+            # 3. FILTER THE FULL ALBUM DETAILS
+            for album in full_albums:
+                if not album: continue
                 for copyright in album.get('copyrights', []):
-                    # Check for the P-line (℗) and the "DK" text
-                    if copyright.get('type') == 'P' and 'DK' in copyright.get('text', ''):
+                    copyright_text = copyright.get('text', '').lower()
+                    
+                    # Check for 'dk' OR 'distrokid' in the P-line
+                    if copyright.get('type') == 'P' and ('dk' in copyright_text or 'distrokid' in copyright_text):
                         for artist in album.get('artists', []):
                             artists_found.add(artist.get('name'))
                         break # Move to the next album
@@ -185,4 +229,3 @@ if __name__ == '__main__':
     # Gunicorn (which Render uses) will not run this block.
     # This is only for local testing.
     app.run(debug=True, port=5000)
-
