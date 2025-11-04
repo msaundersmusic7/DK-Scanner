@@ -88,23 +88,42 @@ def get_full_album_details(album_ids, token):
     if not album_ids:
         return []
         
-    albums_url = 'https://api.spotify.com/v1/albums'
-    auth_header = {"Authorization": f"Bearer {token}"}
-    params = {
-        'ids': ','.join(album_ids) # Spotify API takes a comma-separated string of IDs
-    }
+    albums_url = 'https://api.spotify.com/v1/albums' # Base URL for getting albums
     
-    try:
-        response = requests.get(albums_url, headers=auth_header, params=params)
-        response.raise_for_status()
-        data = response.json()
-        return data.get('albums', [])
-    except requests.exceptions.HTTPError as err:
-        app.logger.error(f"HTTP error getting full album details: {err}")
-        return []
-    except Exception as e:
-        app.logger.error(f"Unexpected error in get_full_album_details: {e}")
-        return []
+    full_album_list = []
+    
+    # Split album_ids into chunks of 20 (Spotify's max for this endpoint)
+    for i in range(0, len(album_ids), 20):
+        chunk = album_ids[i:i + 20]
+        
+        params = {
+            'ids': ','.join(chunk) # Spotify API takes a comma-separated string of IDs
+        }
+        auth_header = {"Authorization": f"Bearer {token}"}
+        
+        try:
+            response = requests.get(albums_url, headers=auth_header, params=params)
+            
+            if response.status_code == 429:
+                retry_after = int(response.headers.get('Retry-After', 10))
+                app.logger.warning(f"Rate limited getting album details. Waiting {retry_after}s...")
+                time.sleep(retry_after)
+                # Re-run this chunk
+                response = requests.get(albums_url, headers=auth_header, params=params)
+
+            response.raise_for_status()
+            data = response.json()
+            full_album_list.extend(data.get('albums', []))
+        
+        except requests.exceptions.HTTPError as err:
+            app.logger.error(f"HTTP error getting full album details: {err}")
+            # Continue to the next chunk
+        except Exception as e:
+            app.logger.error(f"Unexpected error in get_full_album_details: {e}")
+            # Continue to the next chunk
+            
+    return full_album_list
+
 
 # --- Main API Route: /api/scan ---
 @app.route('/api/scan')
@@ -132,7 +151,7 @@ def scan_for_artists():
     
     # Set initial parameters for the first request
     params = {
-        'q': '"Records DK"',  # *** NEW, MORE SPECIFIC SEARCH QUERY ***
+        'q': 'year:2025',  # *** UPDATED TO SEARCH FOR 2025 ***
         'type': 'album',
         'limit': 50,       # Get 50 albums per page
         'offset': 0
