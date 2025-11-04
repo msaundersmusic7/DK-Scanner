@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spotify 'DK' Label Scanner</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Simple loading spinner */
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            border-left-color: #3b82f6;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 font-sans p-6 min-h-screen">
+    <div class="max-w-2xl mx-auto">
+        
+        <h1 class="text-3xl font-bold text-center mb-2">Spotify 'DK' Label Scanner</h1>
+        <p class="text-gray-400 text-center mb-6">Finds artists on Spotify with 'DK' in their P-Line (℗), which often indicates distribution by DistroKid.</p>
+
+        <!-- Step 1: Run -->
+        <div class="text-center mb-6">
+            <button id="start-scan" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg shadow-md transition duration-200 flex items-center justify-center">
+                <span id="button-text">Start Scan</span>
+                <div id="loading-spinner" class="spinner ml-3 hidden"></div>
+            </button>
+        </div>
+
+        <!-- Step 2: Results -->
+        <div id="results-container" class="bg-gray-800 p-6 rounded-lg shadow-lg hidden">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-semibold">Results</h2>
+                <button id="download-results" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg text-sm hidden">
+                    Download .txt
+                </button>
+            </div>
+            
+            <div id="status" class="text-gray-400 mb-4">Idle. Click "Start Scan" to begin.</div>
+            
+            <textarea id="results-list" class="w-full h-64 bg-gray-900 border border-gray-700 rounded-lg p-4 text-gray-200 font-mono text-sm" readonly placeholder="Found artists will appear here..."></textarea>
+        </div>
+
+    </div>
+
+    <script>
+        // --- DOM Elements ---
+        const startButton = document.getElementById('start-scan');
+        const buttonText = document.getElementById('button-text');
+        const loadingSpinner = document.getElementById('loading-spinner');
+        const resultsContainer = document.getElementById('results-container');
+        const statusEl = document.getElementById('status');
+        const resultsListEl = document.getElementById('results-list');
+        const downloadButton = document.getElementById('download-results');
+
+        // --- App State ---
+        let foundArtists = [];
+        let isScanning = false;
+
+        // --- Event Listeners ---
+        startButton.addEventListener('click', handleStartScan);
+        downloadButton.addEventListener('click', downloadResults);
+
+        async function handleStartScan() {
+            if (isScanning) return;
+            
+            // This is the only URL we need. It's relative to the current host.
+            const scanUrl = '/api/scan';
+
+            // Reset UI for a new scan
+            isScanning = true;
+            foundArtists = [];
+            resultsListEl.value = "";
+            resultsContainer.classList.remove('hidden');
+            downloadButton.classList.add('hidden');
+            loadingSpinner.classList.remove('hidden');
+            buttonText.textContent = "Scanning...";
+            startButton.disabled = true;
+            startButton.classList.add('opacity-50', 'cursor-not-allowed');
+
+            try {
+                updateStatus("1. Contacting server...");
+                
+                const response = await fetch(scanUrl);
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || `Server responded with status ${response.status}`);
+                }
+                
+                const data = await response.json();
+                foundArtists = data.artists || [];
+                
+                // Finished
+                const totalFound = foundArtists.length;
+                if(totalFound > 0) {
+                    resultsListEl.value = foundArtists.join('\n');
+                    downloadButton.classList.remove('hidden');
+                }
+                updateStatus(`Scan complete! Found ${totalFound} unique artists.`);
+
+            } catch (error) {
+                if (error instanceof TypeError) {
+                     showError(`Network error. Cannot reach server.`);
+                } else {
+                    showError(error.message);
+                }
+            } finally {
+                // Re-enable UI
+                isScanning = false;
+                loadingSpinner.classList.add('hidden');
+                buttonText.textContent = "Start New Scan";
+                startButton.disabled = false;
+                startButton.classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+        }
+
+        function downloadResults() {
+            const text = foundArtists.join('\n');
+            const blob = new Blob([text], { type: 'text/plain' });
+            const anchor = document.createElement('a');
+            anchor.download = 'distrokid_artists.txt';
+            anchor.href = window.URL.createObjectURL(blob);
+            anchor.click();
+            window.URL.revokeObjectURL(anchor.href);
+        }
+
+        // --- UI Helper Functions ---
+        function updateStatus(message) {
+            statusEl.textContent = message;
+            statusEl.classList.remove('text-red-400');
+        }
+
+        function showError(message) {
+            statusEl.textContent = `Error: ${message}`;
+            statusEl.classList.add('text-red-400');
+            
+            // Stop loading/scanning state
+            isScanning = false;
+            loadingSpinner.classList.add('hidden');
+            buttonText.textContent = "Start New Scan";
+            startButton.disabled = false;
+            startButton.classList.remove('opacity-50', 'cursor-not-allowed');
+        }
+    </script>
+</body>
+</html>
+
