@@ -88,7 +88,8 @@ def get_full_album_details(album_ids, token):
     if not album_ids:
         return []
         
-    albums_url = 'https://api.spotify.com/v1/albums' # Base URL for getting albums
+    # *** THIS IS THE CORRECTED URL (was 'https' before) ***
+    albums_url = 'https://api.spotify.com/v1/albums' 
     
     full_album_list = []
     
@@ -151,7 +152,7 @@ def scan_for_artists():
     
     # Set initial parameters for the first request
     params = {
-        'q': 'year:2025',  # *** UPDATED TO SEARCH FOR 2025 ***
+        'q': 'label:"Records DK"',  # *** THE CORRECT, TARGETED SEARCH QUERY ***
         'type': 'album',
         'limit': 50,       # Get 50 albums per page
         'offset': 0
