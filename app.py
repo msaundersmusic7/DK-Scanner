@@ -5,6 +5,8 @@ from flask import Flask, jsonify, make_response
 from flask_cors import CORS
 import requests
 import logging
+# Import modules needed for parsing URLs
+from urllib.parse import urlparse, parse_qs
 
 # --- Flask App Setup ---
 app = Flask(__name__)
@@ -42,8 +44,6 @@ def get_spotify_token():
         app.logger.error("CRITICAL: Missing SPOTIFY_CLIENT_ID or SPOTIFY_CLIENT_SECRET environment variables.")
         return None
 
-    # --- THIS WAS THE BUG ---
-    # The URL was wrong. It is now corrected to the real API endpoint.
     auth_url = 'https://accounts.spotify.com/api/token'
     
     # Base64 encode the Client ID and Secret
@@ -87,7 +87,6 @@ def scan_for_artists():
     token = get_spotify_token()
     
     if not token:
-        # This is the error the user is seeing.
         app.logger.warning("Token request failed. Sending auth error to client.")
         return jsonify({"error": "Authentication failed. Server credentials may be missing."}), 500
 
@@ -95,26 +94,33 @@ def scan_for_artists():
     artists_found = set()
     total_albums_scanned = 0
     
-    # Corrected the search URL.
+    # Start with the base search URL and parameters
     search_url = 'https://api.spotify.com/v1/search'
     auth_header = {"Authorization": f"Bearer {token}"}
     
     page_count = 0
-    max_pages = 20 # Limit to 20 pages (1000 albums) for a single request
+    max_pages = 20 # Limit to 20 pages (1000 albums)
     
-    # We will use this as the 'next' URL parameter, starting at offset 0
-    current_offset = 0
+    # Set initial parameters for the first request
+    params = {
+        'q': '"Records DK"',  # Changed to a broader search query
+        'type': 'album',
+        'limit': 50,
+        'offset': 0
+    }
     
-    while page_count < max_pages:
+    # We will use 'next_url' to paginate. 'search_url' will be the base.
+    next_url = search_url # For the first loop
+    
+    while next_url and page_count < max_pages:
         try:
-            params = {
-                'q': 'label:"Records DK"',
-                'type': 'album',
-                'limit': 50,
-                'offset': current_offset
-            }
-            
-            response = requests.get(search_url, headers=auth_header, params=params)
+            # For the first request, we pass params. For all others,
+            # we just call the 'next_url' which already has all params.
+            if page_count == 0:
+                response = requests.get(search_url, headers=auth_header, params=params)
+            else:
+                response = requests.get(next_url, headers=auth_header)
+
             
             if response.status_code == 429:
                 retry_after = int(response.headers.get('Retry-After', 10))
@@ -135,30 +141,22 @@ def scan_for_artists():
 
             for album in albums:
                 for copyright in album.get('copyrights', []):
+                    # Check for the P-line (℗) and the "DK" text
                     if copyright.get('type') == 'P' and 'DK' in copyright.get('text', ''):
                         for artist in album.get('artists', []):
                             artists_found.add(artist.get('name'))
-                        break
+                        break # Move to the next album
             
-            app.logger.info(f"Scanned {total_albums_scanned} albums...")
+            app.logger.info(f"Scanned {total_albums_scanned} albums... Found {len(artists_found)} artists so far.")
             
-            # Spotify's 'next' URL is the best way to paginate
+            # Get the URL for the next page of results
             next_url = data.get('albums', {}).get('next')
-            if next_url:
-                # The 'next' URL is a full URL. We just need to use it.
-                search_url = next_url
-                # We need to extract the offset from the next_url to update our params for the next loop
-                # This is a bit safer in case the 'next' URL logic changes
-                query_params = requests.utils.urlparse(next_url).query
-                current_offset = dict(qc.split("=") for qc in query_params.split("&")).get('offset', 0)
-            else:
-                break # No 'next' URL, we are done
             
             time.sleep(0.1) # Be nice to the API
 
         except requests.exceptions.HTTPError as err:
             app.logger.error(f"ERROR during search: {err}")
-            return jsonify({"error": f"Error during Spotify search: {err}"}), 500
+            return jsonify({"error": f"Error during Spotify search: {err.response.text}"}), 500
         except Exception as e:
             app.logger.error(f"ERROR: An unexpected error occurred during search: {e}")
             return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
