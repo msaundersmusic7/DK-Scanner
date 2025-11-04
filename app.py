@@ -47,7 +47,6 @@ def get_spotify_token():
         app.logger.error("CRITICAL: Missing SPOTIFY_CLIENT_ID or SPOTIFY_CLIENT_SECRET environment variables.")
         return None
 
-    # *** THIS IS THE CORRECT URL ***
     auth_url = 'https://accounts.spotify.com/api/token'
     
     # Base64 encode the Client ID and Secret
@@ -85,8 +84,6 @@ def get_spotify_token():
 def get_full_album_details(album_ids, token):
     """
     Fetches full album details for a list of album IDs.
-    The 'search' endpoint only returns simplified objects without copyright info.
-    This function gets the full objects.
     """
     if not album_ids:
         return []
@@ -128,7 +125,7 @@ def get_full_album_details(album_ids, token):
     return full_album_list
 
 
-# --- ** NEW: Helper Function to Get Artist Details ** ---
+# --- Helper Function to Get Artist Details ** ---
 def get_artist_details(artist_ids, token):
     """
     Fetches full artist details (followers, popularity) for a list of artist IDs.
@@ -192,18 +189,33 @@ def scan_for_artists():
     page_count = 0
     max_pages = 20 # Limit to 20 pages (1000 albums)
     
-    # --- ** NEW: Random wildcard search ** ---
+    # --- ** NEW: Random Offset Search ** ---
     # This ensures you get a new set of results each time you scan
-    wildcard = random.choice(string.ascii_lowercase)
-    query = f'label:"Records DK" %{wildcard}%' # e.g., 'label:"Records DK" %a%'
-    app.logger.info(f"Using randomized search query: {query}")
     
+    # 1. First, do a dummy search to find the total number of results
+    total_results = 1000 # Default to 1000
+    try:
+        dummy_params = {'q': 'label:"Records DK"', 'type': 'album', 'limit': 1}
+        dummy_response = requests.get(search_url, headers=auth_header, params=dummy_params)
+        dummy_response.raise_for_status()
+        total_results = dummy_response.json().get('albums', {}).get('total', 1000)
+        # Spotify's max offset is 1000 (or 2000 results). We will cap it at 950 to be safe.
+        app.logger.info(f"Total results for query: {total_results}")
+    except Exception as e:
+        app.logger.error(f"Error getting total results: {e}")
+        
+    # 2. Pick a random starting point (offset)
+    # Max offset is 950 (page 20 * 50 albums/page = 1000 results limit)
+    max_possible_offset = min(total_results, 950) 
+    random_offset = random.randint(0, max_possible_offset // 50) * 50
+    app.logger.info(f"Starting scan at random offset: {random_offset}")
+
     # Set initial parameters for the first request
     params = {
-        'q': query,
+        'q': 'label:"Records DK"',  # This is still the best query
         'type': 'album',
-        'limit': 50,       # Get 50 albums per page
-        'offset': 0
+        'limit': 50,       
+        'offset': random_offset
     }
     
     next_url = search_url # For the first loop
@@ -252,9 +264,9 @@ def scan_for_artists():
                 for copyright in album.get('copyrights', []):
                     copyright_text = copyright.get('text', '').lower()
                     
-                    # --- ** NEW: Simplified and Corrected Filter ** ---
-                    # This removes the broken regex and uses a simple check
-                    if copyright.get('type') == 'P' and ('records dk' in copyright_text or 'distrokid' in copyright_text):
+                    # --- ** NEW: Stricter Filter (Fixes "Bach Problem") ** ---
+                    # We ONLY look for "records dk". We REMOVED "or 'distrokid'"
+                    if copyright.get('type') == 'P' and 'records dk' in copyright_text:
                         for artist in album.get('artists', []):
                             artist_id = artist.get('id')
                             artist_name = artist.get('name')
