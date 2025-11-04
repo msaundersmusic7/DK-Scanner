@@ -42,7 +42,9 @@ def get_spotify_token():
         app.logger.error("CRITICAL: Missing SPOTIFY_CLIENT_ID or SPOTIFY_CLIENT_SECRET environment variables.")
         return None
 
-    auth_url = 'https://community.spotify.com/t5/Accounts/Changing-my-country/td-p/46819755'
+    # --- THIS WAS THE BUG ---
+    # The URL was wrong. It is now corrected to the real API endpoint.
+    auth_url = 'https://accounts.spotify.com/api/token'
     
     # Base64 encode the Client ID and Secret
     auth_string = f"{CLIENT_ID}:{CLIENT_SECRET}"
@@ -93,15 +95,26 @@ def scan_for_artists():
     artists_found = set()
     total_albums_scanned = 0
     
-    search_url = 'https://www.google.com/search?q=http.googleusercontent.com/spotify.com/31'
+    # Corrected the search URL.
+    search_url = 'https://api.spotify.com/v1/search'
     auth_header = {"Authorization": f"Bearer {token}"}
     
     page_count = 0
-    max_pages = 20 # Limit to 20 pages (1000 albums) for a single request to avoid abuse
-
-    while search_url and page_count < max_pages:
+    max_pages = 20 # Limit to 20 pages (1000 albums) for a single request
+    
+    # We will use this as the 'next' URL parameter, starting at offset 0
+    current_offset = 0
+    
+    while page_count < max_pages:
         try:
-            response = requests.get(search_url, headers=auth_header)
+            params = {
+                'q': 'label:"Records DK"',
+                'type': 'album',
+                'limit': 50,
+                'offset': current_offset
+            }
+            
+            response = requests.get(search_url, headers=auth_header, params=params)
             
             if response.status_code == 429:
                 retry_after = int(response.headers.get('Retry-After', 10))
@@ -115,7 +128,7 @@ def scan_for_artists():
             
             if not albums:
                 app.logger.info("No more albums found.")
-                break
+                break # No more results, exit the loop
 
             total_albums_scanned += len(albums)
             page_count += 1
@@ -128,7 +141,19 @@ def scan_for_artists():
                         break
             
             app.logger.info(f"Scanned {total_albums_scanned} albums...")
-            search_url = data.get('albums', {}).get('next')
+            
+            # Spotify's 'next' URL is the best way to paginate
+            next_url = data.get('albums', {}).get('next')
+            if next_url:
+                # The 'next' URL is a full URL. We just need to use it.
+                search_url = next_url
+                # We need to extract the offset from the next_url to update our params for the next loop
+                # This is a bit safer in case the 'next' URL logic changes
+                query_params = requests.utils.urlparse(next_url).query
+                current_offset = dict(qc.split("=") for qc in query_params.split("&")).get('offset', 0)
+            else:
+                break # No 'next' URL, we are done
+            
             time.sleep(0.1) # Be nice to the API
 
         except requests.exceptions.HTTPError as err:
