@@ -24,11 +24,6 @@ logging.basicConfig(level=logging.DEBUG)
 CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
-# --- ** NEW: Stricter Regex filter for P-Line ** ---
-# This looks for one or more digits (\d+), followed by a space (\s+),
-# followed by "records dk". This is the strict pattern we need.
-P_LINE_REGEX = re.compile(r"\d+\s+records\s+dk", re.IGNORECASE)
-
 # --- Helper Function: Get Access Token ---
 def get_spotify_token():
     """
@@ -194,15 +189,14 @@ def scan_for_artists():
     page_count = 0
     max_pages = 20 # Limit to 20 pages (1000 albums)
     
-    # --- ** FINAL CORRECTED SEARCH LOGIC ** ---
+    # --- ** NEW: Random Offset Search ** ---
+    # This ensures you get a new set of results each time you scan
     
     # 1. First, do a dummy search to find the total number of results
     total_results = 1000 # Default to 1000
-    
-    # *** THIS IS THE CORRECT, TARGETED QUERY ***
-    search_query = 'label:"Records DK"' 
-    
     try:
+        # *** NEW: Broad query for new, random indie music ***
+        search_query = f"tag:new %{random.choice(string.ascii_lowercase)}%"
         dummy_params = {'q': search_query, 'type': 'album', 'limit': 1}
         dummy_response = requests.get(search_url, headers=auth_header, params=dummy_params)
         dummy_response.raise_for_status()
@@ -272,11 +266,12 @@ def scan_for_artists():
             for album in full_albums:
                 if not album: continue
                 for copyright in album.get('copyrights', []):
-                    copyright_text = copyright.get('text', '') # No .lower() needed for regex
+                    copyright_text = copyright.get('text', '').lower()
                     
-                    # --- ** FINAL, STRICT REGEX FILTER (Fixes "EsDeeKid Problem") ** ---
-                    # We ONLY look for the pattern "[Numbers] Records DK"
-                    if copyright.get('type') == 'P' and P_LINE_REGEX.search(copyright_text):
+                    # --- ** FINAL, CORRECTED FILTER (Fixes "Bach" & "EsDeeKid") ** ---
+                    # We look for "records dk" OR "distrokid"
+                    # This is the simple, robust filter that will work.
+                    if copyright.get('type') == 'P' and ('records dk' in copyright_text or 'distrokid' in copyright_text):
                         for artist in album.get('artists', []):
                             artist_id = artist.get('id')
                             artist_name = artist.get('name')
@@ -352,4 +347,3 @@ if __name__ == '__main__':
     # Gunicorn (which Render uses) will not run this block.
     # This is only for local testing.
     app.run(debug=True, port=5000)
-
