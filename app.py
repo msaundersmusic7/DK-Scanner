@@ -174,6 +174,51 @@ def get_artist_details(artist_ids, token):
 
     return artist_details_list
 
+# --- ** NEW: Helper Function to Check Artist's Most Recent Release ** ---
+def check_artist_most_recent_release(artist_id, token):
+    """
+    Gets the artist's most recent album/single and checks its P-line.
+    Returns True if it matches, False otherwise.
+    """
+    try:
+        # 1. Get the artist's most recent album or single
+        url = f"https://api.spotify.com/v1/artists/{artist_id}/albums"
+        params = {
+            'include_groups': 'album,single',
+            'limit': 1,
+            'country': 'US' # Use US market as a standard
+        }
+        headers = {"Authorization": f"Bearer {token}"}
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        
+        data = response.json()
+        if not data.get('items'):
+            app.logger.warning(f"Artist {artist_id} has no recent items to check.")
+            return False # Artist has no albums
+            
+        most_recent_album_id = data['items'][0]['id']
+
+        # 2. Get the *full details* of that one album
+        full_album_details = get_full_album_details([most_recent_album_id], token)
+        if not full_album_details:
+            app.logger.warning(f"Could not get details for recent album {most_recent_album_id}")
+            return False
+
+        # 3. Check its P-line
+        for copyright in full_album_details[0].get('copyrights', []):
+            copyright_text = copyright.get('text', '')
+            if copyright.get('type') == 'P' and P_LINE_REGEX.search(copyright_text):
+                app.logger.info(f"CONFIRMED: Artist {artist_id} most recent release has DK P-line.")
+                return True # Found a match
+
+        app.logger.info(f"REJECTED: Artist {artist_id} most recent release does NOT have DK P-line.")
+        return False # No P-line match on most recent release
+        
+    except Exception as e:
+        app.logger.error(f"Error checking recent release for artist {artist_id}: {e}")
+        return False
+
 
 # --- ** NEW API Route: /api/start_scan ** ---
 @app.route('/api/start_scan')
@@ -275,11 +320,12 @@ def get_details():
     """
     STEP 2: Receives a list of album IDs from the frontend,
     filters them, and returns any artists found.
-    This is fast and will not time out.
     """
     app.logger.info("Received request at /api/get_details")
     data = request.get_json()
     album_ids = data.get('album_ids')
+    # ** NEW: Get the list of artists we've already found **
+    artists_already_found = data.get('artists_already_found', [])
 
     if not album_ids:
         app.logger.error("No album IDs provided to /api/get_details")
@@ -289,7 +335,7 @@ def get_details():
     if not token:
         return jsonify({"error": "Authentication failed. Server credentials may be missing."}), 500
 
-    artists_found = {} # {id: {name, url}}
+    artists_to_fetch_details_for = {} # {id: {name, url}}
     
     # 1. GET FULL ALBUM DETAILS (with Copyrights)
     app.logger.debug(f"Getting full details for {len(album_ids)} albums...")
@@ -306,28 +352,32 @@ def get_details():
                 for artist in album.get('artists', []):
                     artist_id = artist.get('id')
                     artist_name = artist.get('name')
-                    artist_url = artist.get('external_urls', {}).get('spotify')
-                    if artist_id and artist_name and artist_id not in artists_found:
-                        artists_found[artist_id] = {
-                            "name": artist_name,
-                            "url": artist_url
-                        }
+                    
+                    # ** NEW: Duplicate check **
+                    if artist_id and artist_name and artist_id not in artists_already_found:
+                        
+                        # ** NEW: Check artist's most recent release **
+                        if check_artist_most_recent_release(artist_id, token):
+                            artists_to_fetch_details_for[artist_id] = {
+                                "name": artist_name,
+                                "url": artist.get('external_urls', {}).get('spotify')
+                            }
                 break # Found a match, move to the next album
     
-    if not artists_found:
-        app.logger.info("Chunk processed. Found 0 artists.")
+    if not artists_to_fetch_details_for:
+        app.logger.info("Chunk processed. Found 0 new artists.")
         return jsonify({"artists": []}) # Return empty list, not an error
 
     # 3. GET POPULARITY AND FOLLOWERS
-    app.logger.info(f"Chunk processed. Found {len(artists_found)} artists. Now fetching details...")
-    artist_ids_list = list(artists_found.keys())
+    app.logger.info(f"Chunk processed. Found {len(artists_to_fetch_details_for)} new artists. Now fetching details...")
+    artist_ids_list = list(artists_to_fetch_details_for.keys())
     detailed_artists = get_artist_details(artist_ids_list, token)
 
     final_artist_list = []
     for artist_data in detailed_artists:
         if not artist_data: continue
         artist_id = artist_data.get('id')
-        base_info = artists_found.get(artist_id)
+        base_info = artists_to_fetch_details_for.get(artist_id)
         if base_info:
             artist_followers = artist_data.get('followers', {}).get('total', 0)
             
@@ -337,7 +387,8 @@ def get_details():
                     "name": base_info['name'],
                     "url": base_info['url'],
                     "followers": artist_followers,
-                    "popularity": artist_data.get('popularity', 0)
+                    "popularity": artist_data.get('popularity', 0),
+                    "id": artist_id # ** NEW: Send ID to frontend for duplicate checking **
                 })
             else:
                  app.logger.info(f"Filtering out artist: {base_info['name']} (Followers: {artist_followers})")
