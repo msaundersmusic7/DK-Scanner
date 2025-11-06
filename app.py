@@ -26,11 +26,6 @@ logging.basicConfig(level=logging.DEBUG)
 CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
-# --- ** Stricter Regex filter for P-Line ** ---
-# This looks for one or more digits (\d+), followed by a space (\s+),
-# followed by "records dk". This is the strict pattern we need.
-P_LINE_REGEX = re.compile(r"\d+\s+records\s+dk", re.IGNORECASE)
-
 # --- ** Follower Threshold ** ---
 # We will filter out any artist with more than this many followers.
 MAX_FOLLOWERS = 100000
@@ -272,11 +267,11 @@ def scan_for_artists():
     for album in full_albums:
         if not album: continue
         for copyright in album.get('copyrights', []):
-            copyright_text = copyright.get('text', '') # No .lower() needed for regex
+            copyright_text = copyright.get('text', '').lower() # Convert to lowercase
             
-            # --- ** FINAL, STRICT REGEX FILTER ** ---
-            # We ONLY look for the pattern "[Numbers] Records DK"
-            if copyright.get('type') == 'P' and P_LINE_REGEX.search(copyright_text):
+            # --- ** FINAL, CORRECTED, SIMPLE FILTER ** ---
+            # We ONLY look for the exact string "records dk"
+            if copyright.get('type') == 'P' and 'records dk' in copyright_text:
                 for artist in album.get('artists', []):
                     artist_id = artist.get('id')
                     artist_name = artist.get('name')
