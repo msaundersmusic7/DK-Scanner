@@ -4,12 +4,10 @@ import time
 import random
 import string
 import re
-from flask import Flask, jsonify, make_response
+from flask import Flask, jsonify, make_response, request
 from flask_cors import CORS
 import requests
 import logging
-from bs4 import BeautifulSoup # <-- For scraping Google
-
 # Import modules needed for parsing URLs
 from urllib.parse import urlparse, parse_qs
 
@@ -25,6 +23,11 @@ logging.basicConfig(level=logging.DEBUG)
 # Load credentials securely from environment variables
 CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
+
+# --- ** Stricter Regex filter for P-Line ** ---
+# This looks for one or more digits (\d+), followed by a space (\s+),
+# followed by "records dk". This is the strict pattern we need.
+P_LINE_REGEX = re.compile(r"\d+\s+records\s+dk", re.IGNORECASE)
 
 # --- ** Follower Threshold ** ---
 # We will filter out any artist with more than this many followers.
@@ -172,126 +175,151 @@ def get_artist_details(artist_ids, token):
     return artist_details_list
 
 
-# --- ** NEW: Helper Function to Scrape Google ** ---
-def scrape_google_for_spotify_links():
+# --- ** NEW API Route: /api/start_scan ** ---
+@app.route('/api/start_scan')
+def start_scan():
     """
-    Scrapes Google for 'site:open.spotify.com/album "Records DK"'
-    and returns a set of unique Spotify Album IDs.
+    STEP 1: Performs the initial search and returns a list of album IDs.
+    This is fast and will not time out.
     """
-    app.logger.info("Scraping Google for Spotify links...")
-    google_url = "https://www.google.com/search"
-    # This query finds albums on Spotify that explicitly mention "Records DK"
-    google_query = 'site:open.spotify.com/album "Records DK"'
-    
-    # We must use a User-Agent, or Google will block us with a 403 error
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.88 Safari/537.36'
-    }
-    
-    album_ids = set()
-    
-    # ** NEW: Scan 3 pages of results, starting at a random page **
-    # Pick a random starting page (0, 10, 20, ..., 50)
-    start_index = random.choice(range(0, 51, 10))
-    
-    for page in range(3): # Scan 3 pages
-        start = start_index + (page * 10)
-        params = {
-            'q': google_query,
-            'num': 10, # 10 results per page
-            'start': start
-        }
-        
-        app.logger.info(f"Scraping Google page {page + 1} (start index {start})...")
-        
-        try:
-            response = requests.get(google_url, params=params, headers=headers)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.text, 'lxml')
-            
-            # This regex finds Spotify album links and extracts the ID
-            album_link_pattern = re.compile(r"https://open\.spotify\.com/album/([a-zA-Z0-9]+)")
-            
-            for a in soup.find_all('a'):
-                href = a.get('href')
-                if href:
-                    match = album_link_pattern.search(href)
-                    if match:
-                        album_id = match.group(1)
-                        album_ids.add(album_id)
-            
-            time.sleep(0.5) # Be nice to Google
-            
-        except requests.exceptions.HTTPError as err:
-            app.logger.error(f"HTTP error while scraping Google: {err}")
-            # Don't stop, just try the next page
-        except Exception as e:
-            app.logger.error(f"Unexpected error while scraping Google: {e}")
-            
-    app.logger.info(f"Google scrape found {len(album_ids)} unique album IDs.")
-    return list(album_ids)
-
-
-# --- Main API Route: /api/scan ---
-@app.route('/api/scan')
-def scan_for_artists():
-    """
-    Main API endpoint to scan Spotify and return a list of artists.
-    """
-    app.logger.info("Received scan request at /api/scan")
-    
-    # --- ** NEW, FASTER LOGIC ** ---
-    
-    # 1. Scrape Google FIRST to get a high-quality list of IDs
-    album_ids = scrape_google_for_spotify_links()
-    
-    if not album_ids:
-        app.logger.info("Google scrape found 0 IDs. Returning 0 artists.")
-        return jsonify({"artists": []})
-        
-    # 2. Get Spotify token to enrich this list
+    app.logger.info("Received scan request at /api/start_scan")
     token = get_spotify_token()
+    
     if not token:
         app.logger.warning("Token request failed. Sending auth error to client.")
         return jsonify({"error": "Authentication failed. Server credentials may be missing."}), 500
 
-    app.logger.info(f"Authentication successful. Enriching {len(album_ids)} album IDs from Spotify...")
-    artists_found = {} # Use a dictionary to store {id: {name, url}}
+    app.logger.info("Authentication successful. Starting album ID search...")
+    all_album_ids = []
     
-    # 3. Get Full Album Details (with Copyrights)
+    # Start with the base search URL
+    search_url = 'https://api.spotify.com/v1/search'
+    auth_header = {"Authorization": f"Bearer {token}"}
+    
+    page_count = 0
+    max_pages = 20 # Limit to 20 pages (1000 albums)
+    
+    # --- ** FINAL CORRECTED SEARCH LOGIC ** ---
+    total_results = 1000
+    search_query = 'label:"Records DK"' 
+    
+    try:
+        dummy_params = {'q': search_query, 'type': 'album', 'limit': 1}
+        dummy_response = requests.get(search_url, headers=auth_header, params=dummy_params)
+        dummy_response.raise_for_status()
+        total_results = dummy_response.json().get('albums', {}).get('total', 1000)
+        app.logger.info(f"Total results for query '{search_query}': {total_results}")
+    except Exception as e:
+        app.logger.error(f"Error getting total results: {e}")
+        
+    max_possible_offset = min(total_results, 950) 
+    random_offset = 0
+    if max_possible_offset > 50:
+         random_offset = random.randint(0, max_possible_offset // 50) * 50
+    app.logger.info(f"Starting scan at random offset: {random_offset}")
+
+    params = {
+        'q': search_query,
+        'type': 'album',
+        'limit': 50,       
+        'offset': random_offset
+    }
+    
+    next_url = search_url # For the first loop
+    
+    while next_url and page_count < max_pages:
+        try:
+            # 1. SEARCH FOR ALBUMS (Simplified)
+            app.logger.debug(f"Scanning page {page_count + 1}...")
+            if page_count == 0:
+                response = requests.get(search_url, headers=auth_header, params=params)
+            else:
+                response = requests.get(next_url, headers=auth_header)
+            
+            if response.status_code == 429:
+                retry_after = int(response.headers.get('Retry-After', 10))
+                app.logger.warning(f"Rate limited. Waiting {retry_after}s...")
+                time.sleep(retry_after)
+                continue
+            
+            response.raise_for_status()
+            data = response.json()
+            simplified_albums = data.get('albums', {}).get('items', [])
+            
+            if not simplified_albums:
+                app.logger.info("No more albums found.")
+                break 
+
+            # Collect all album IDs from this page
+            album_ids = [album['id'] for album in simplified_albums if album and album.get('id')]
+            all_album_ids.extend(album_ids)
+            
+            page_count += 1
+            next_url = data.get('albums', {}).get('next')
+            time.sleep(0.1) # Be nice to the API
+
+        except requests.exceptions.HTTPError as err:
+            app.logger.error(f"ERROR during search: {err}")
+            return jsonify({"error": f"Error during Spotify search: {err.response.text}"}), 500
+        except Exception as e:
+            app.logger.error(f"ERROR: An unexpected error occurred during search: {e}")
+            return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
+
+    app.logger.info(f"Initial search complete. Found {len(all_album_ids)} album IDs to process.")
+    return jsonify({"album_ids": all_album_ids})
+
+
+# --- ** NEW API Route: /api/get_details ** ---
+@app.route('/api/get_details', methods=['POST'])
+def get_details():
+    """
+    STEP 2: Receives a list of album IDs from the frontend,
+    filters them, and returns any artists found.
+    This is fast and will not time out.
+    """
+    app.logger.info("Received request at /api/get_details")
+    data = request.get_json()
+    album_ids = data.get('album_ids')
+
+    if not album_ids:
+        app.logger.error("No album IDs provided to /api/get_details")
+        return jsonify({"error": "No album IDs provided"}), 400
+
+    token = get_spotify_token()
+    if not token:
+        return jsonify({"error": "Authentication failed. Server credentials may be missing."}), 500
+
+    artists_found = {} # {id: {name, url}}
+    
+    # 1. GET FULL ALBUM DETAILS (with Copyrights)
     app.logger.debug(f"Getting full details for {len(album_ids)} albums...")
     full_albums = get_full_album_details(album_ids, token)
 
-    # 4. Filter the Full Album Details
+    # 2. FILTER THE FULL ALBUM DETAILS
     for album in full_albums:
         if not album: continue
         for copyright in album.get('copyrights', []):
-            copyright_text = copyright.get('text', '').lower() # Convert to lowercase
+            copyright_text = copyright.get('text', '') # No .lower() needed for regex
             
-            # --- ** FINAL, CORRECTED, SIMPLE FILTER ** ---
-            # We ONLY look for the exact string "records dk"
-            if copyright.get('type') == 'P' and 'records dk' in copyright_text:
+            # --- ** FINAL, STRICT REGEX FILTER ** ---
+            if copyright.get('type') == 'P' and P_LINE_REGEX.search(copyright_text):
                 for artist in album.get('artists', []):
                     artist_id = artist.get('id')
                     artist_name = artist.get('name')
                     artist_url = artist.get('external_urls', {}).get('spotify')
                     if artist_id and artist_name and artist_id not in artists_found:
-                        # Store by ID to prevent duplicates
                         artists_found[artist_id] = {
                             "name": artist_name,
                             "url": artist_url
                         }
                 break # Found a match, move to the next album
     
-    app.logger.info(f"Scan complete. Found {len(artists_found)} unique artists so far.")
-
-    # 5. Get Popularity and Followers (Back by popular demand!)
     if not artists_found:
-        app.logger.info("Scan complete. Found 0 artists.")
-        return jsonify({"artists": []})
+        app.logger.info("Chunk processed. Found 0 artists.")
+        return jsonify({"artists": []}) # Return empty list, not an error
 
-    app.logger.info(f"Scan complete. Found {len(artists_found)} artists. Now fetching details...")
+    # 3. GET POPULARITY AND FOLLOWERS
+    app.logger.info(f"Chunk processed. Found {len(artists_found)} artists. Now fetching details...")
     artist_ids_list = list(artists_found.keys())
     detailed_artists = get_artist_details(artist_ids_list, token)
 
@@ -301,29 +329,22 @@ def scan_for_artists():
         artist_id = artist_data.get('id')
         base_info = artists_found.get(artist_id)
         if base_info:
-            final_artist_list.append({
-                "name": base_info['name'],
-                "url": base_info['url'],
-                "followers": artist_data.get('followers', {}).get('total', 0),
-                "popularity": artist_data.get('popularity', 0)
-            })
-
-    app.logger.info("Successfully fetched all artist details.")
-    
-    # 6. Filter out "Bach Problem"
-    filtered_artist_list = []
-    for artist in final_artist_list:
-        if artist['followers'] < MAX_FOLLOWERS:
-            filtered_artist_list.append(artist)
-        else:
-            app.logger.info(f"Filtering out artist: {artist['name']} (Followers: {artist['followers']})")
+            artist_followers = artist_data.get('followers', {}).get('total', 0)
             
-    app.logger.info(f"Returning {len(filtered_artist_list)} artists after filtering.")
-    
-    # Sort by name by default
-    final_artist_list_sorted = sorted(filtered_artist_list, key=lambda k: k['name'])
-    
-    return jsonify({"artists": final_artist_list_sorted})
+            # 4. FILTER BY FOLLOWER CAP
+            if artist_followers < MAX_FOLLOWERS:
+                final_artist_list.append({
+                    "name": base_info['name'],
+                    "url": base_info['url'],
+                    "followers": artist_followers,
+                    "popularity": artist_data.get('popularity', 0)
+                })
+            else:
+                 app.logger.info(f"Filtering out artist: {base_info['name']} (Followers: {artist_followers})")
+
+    app.logger.info(f"Returning {len(final_artist_list)} artists to frontend.")
+    return jsonify({"artists": final_artist_list})
+
 
 # --- Frontend Route: / ---
 @app.route('/')

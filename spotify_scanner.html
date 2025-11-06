@@ -63,7 +63,7 @@
             </svg>
             <h1 class="text-3xl font-bold text-center ml-3">Spotify 'DK' Scanner</h1>
         </div>
-        <p class="text-gray-400 text-center mb-8">Finds artists on Spotify with 'DK' or 'DistroKid' in their P-Line (℗).</p>
+        <p class="text-gray-400 text-center mb-8">Finds artists on Spotify with the default 'Records DK' P-Line (℗).</p>
 
         <!-- Step 1: Run -->
         <div class="text-center mb-6">
@@ -84,7 +84,7 @@
                     <button id="sort-followers" class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-full text-sm">
                         Sort by Followers
                     </button>
-                    <button id="download-results" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full text-sm">
+                    <button id="download-results" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full text-sm hidden">
                         Download .txt
                     </button>
                 </div>
@@ -133,7 +133,7 @@
 
 
         // --- App State ---
-        let foundArtists = []; // This will now be an array of objects
+        let allArtists = []; // This will now be an array of objects
         let isScanning = false;
         let currentSort = { key: 'name', asc: true };
 
@@ -148,17 +148,15 @@
         sortFollowersHeader.addEventListener('click', () => sortAndRender('followers', !currentSort.asc));
         sortPopularityHeader.addEventListener('click', () => sortAndRender('popularity', !currentSort.asc));
 
-
+        
+        // --- ** NEW: Main Scan Function (Chunking) ** ---
         async function handleStartScan() {
             if (isScanning) return;
             
-            // The URL is now relative! It calls the same server it's hosted on.
-            const scanUrl = '/api/scan'; 
-
-            // Reset UI for a new scan
+            // --- Reset UI ---
             isScanning = true;
-            foundArtists = [];
-            resultsTableBody.innerHTML = `<tr><td colspan="3" class="px-6 py-4 text-center text-gray-500">Scanning Google for candidates...</td></tr>`;
+            allArtists = [];
+            resultsTableBody.innerHTML = `<tr><td colspan="3" class="px-6 py-4 text-center text-gray-500">Scanning, please wait...</td></tr>`;
             resultsContainer.classList.remove('hidden');
             downloadButton.classList.add('hidden');
             loadingSpinner.classList.remove('hidden');
@@ -167,38 +165,61 @@
             startButton.classList.add('opacity-50', 'cursor-not-allowed');
 
             try {
-                updateStatus("Contacting server and starting Google scan... This will be fast.");
-                
-                const response = await fetch(scanUrl);
-
-                if (!response.ok) {
-                    // Try to parse the error as JSON, but fall back to text
-                    let errorMsg;
-                    try {
-                        const errorData = await response.json();
-                        errorMsg = errorData.error;
-                    } catch (e) {
-                        // If the response is HTML (like a 503 error), this will catch it
-                        errorMsg = `Server returned an invalid response (Status: ${response.status}). Check logs.`;
-                    }
-                    throw new Error(errorMsg || `Server responded with status ${response.status}`);
-                }
+                // --- ** STEP 1: Get the full list of album IDs to scan ** ---
+                updateStatus("Step 1/2: Finding candidate albums from Spotify...");
+                const startScanUrl = '/api/start_scan'; 
+                const response = await fetch(startScanUrl);
+                if (!response.ok) throw new Error(await getErrorMessage(response));
                 
                 const data = await response.json();
-                foundArtists = data.artists || []; // This is now a list of {name, url, followers, popularity}
+                const albumIds = data.album_ids || [];
                 
-                // Finished
-                const totalFound = foundArtists.length;
-                
-                if (totalFound > 0) {
-                    // Sort by name by default and render
-                    sortAndRender('name', true);
-                    downloadButton.classList.remove('hidden');
-                } else {
+                if (albumIds.length === 0) {
+                    updateStatus("Scan complete! Found 0 candidate albums. Try scanning again for new results.");
                     resultsTableBody.innerHTML = `<tr><td colspan="3" class="px-6 py-4 text-center text-gray-500">No artists were found matching the criteria. Try scanning again for new results.</td></tr>`;
+                    stopLoading();
+                    return;
+                }
+
+                updateStatus(`Step 1 complete! Found ${albumIds.length} albums. Now scanning them for artists...`);
+                resultsTableBody.innerHTML = ''; // Clear "Scanning..." message
+                
+                // --- ** STEP 2: Scan the IDs in chunks of 20 ** ---
+                const chunkSize = 20;
+                let totalArtistsFound = 0;
+                
+                for (let i = 0; i < albumIds.length; i += chunkSize) {
+                    const chunk = albumIds.slice(i, i + chunkSize);
+                    
+                    // Update status for user
+                    const percent = Math.round(((i + chunkSize) / albumIds.length) * 100);
+                    updateStatus(`Step 2/2: Processing albums... ${percent > 100 ? 100 : percent}% complete.`);
+                    
+                    const detailsUrl = '/api/get_details';
+                    const chunkResponse = await fetch(detailsUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ album_ids: chunk })
+                    });
+                    
+                    if (!chunkResponse.ok) throw new Error(await getErrorMessage(chunkResponse));
+
+                    const chunkData = await chunkResponse.json();
+                    const newArtists = chunkData.artists || [];
+                    
+                    if (newArtists.length > 0) {
+                        allArtists.push(...newArtists);
+                        totalArtistsFound += newArtists.length;
+                        // Re-sort and re-render the table with the new data
+                        sortAndRender(currentSort.key, currentSort.asc);
+                        downloadButton.classList.remove('hidden');
+                    }
                 }
                 
-                updateStatus(`Scan complete! Found ${totalFound} unique artists.`);
+                updateStatus(`Scan complete! Found ${totalArtistsFound} unique artists.`);
+                if (totalArtistsFound === 0) {
+                     resultsTableBody.innerHTML = `<tr><td colspan="3" class="px-6 py-4 text-center text-gray-500">No artists were found matching the criteria. Try scanning again for new results.</td></tr>`;
+                }
 
             } catch (error) {
                 if (error instanceof TypeError) {
@@ -208,13 +229,29 @@
                 }
                  resultsTableBody.innerHTML = `<tr><td colspan="3" class="px-6 py-4 text-center text-red-500">An error occurred. Check status for details.</td></tr>`;
             } finally {
-                // Re-enable UI
-                isScanning = false;
-                loadingSpinner.classList.add('hidden');
-                buttonText.textContent = "Start New Scan";
-                startButton.disabled = false;
-                startButton.classList.remove('opacity-50', 'cursor-not-allowed');
+                stopLoading();
             }
+        }
+        
+        // --- ** NEW: Helper to stop loading state ** ---
+        function stopLoading() {
+            isScanning = false;
+            loadingSpinner.classList.add('hidden');
+            buttonText.textContent = "Start New Scan";
+            startButton.disabled = false;
+            startButton.classList.remove('opacity-50', 'cursor-not-allowed');
+        }
+
+        // --- ** NEW: Helper to parse error messages ** ---
+        async function getErrorMessage(response) {
+            let errorMsg;
+            try {
+                const errorData = await response.json();
+                errorMsg = errorData.error;
+            } catch (e) {
+                errorMsg = `Server returned an invalid response (Status: ${response.status}). Check logs.`;
+            }
+            return errorMsg || `Server responded with status ${response.status}`;
         }
         
         // --- ** NEW: Sort and Render Functions ** ---
@@ -223,7 +260,7 @@
             currentSort = { key, asc };
             
             // Sort the data
-            foundArtists.sort((a, b) => {
+            allArtists.sort((a, b) => {
                 let valA = a[key];
                 let valB = b[key];
                 
@@ -257,12 +294,12 @@
         function renderTable() {
             resultsTableBody.innerHTML = ''; // Clear the table
             
-            if (foundArtists.length === 0) {
+            if (allArtists.length === 0) {
                  resultsTableBody.innerHTML = `<tr><td colspan="3" class="px-6 py-4 text-center text-gray-500">No artists were found matching the criteria.</td></tr>`;
                  return;
             }
             
-            foundArtists.forEach(artist => {
+            allArtists.forEach(artist => {
                 const row = document.createElement('tr');
                 row.className = "hover:bg-gray-800";
                 
@@ -285,7 +322,7 @@
         function downloadResults() {
             // Format the text file to include all new data
             let text = "Artist Name\tFollowers\tPopularity\tSpotify URL\n"; // Header row
-            text += foundArtists.map(artist => {
+            text += allArtists.map(artist => {
                 return `${artist.name}\t${artist.followers}\t${artist.popularity}\t${artist.url}`
             }).join('\n');
             
@@ -308,11 +345,7 @@
             statusEl.classList.add('text-red-400');
             
             // Stop loading/scanning state
-            isScanning = false;
-            loadingSpinner.classList.add('hidden');
-            buttonText.textContent = "Start New Scan";
-            startButton.disabled = false;
-            startButton.classList.remove('opacity-50', 'cursor-not-allowed');
+            stopLoading();
         }
     </script>
 </body>
