@@ -238,83 +238,44 @@ def start_scan():
     all_album_ids = set() # Use a set to avoid duplicates
     auth_header = {"Authorization": f"Bearer {token}"}
 
-    # --- ** SEARCH 1: "Records DK" (Targeted) ** ---
-    try:
-        search_url = 'https://api.spotify.com/v1/search'
-        search_query = 'label:"Records DK"'
-        
-        # Get total results to find a random offset
-        total_results = 1000
-        try:
-            dummy_params = {'q': search_query, 'type': 'album', 'limit': 1}
-            dummy_response = requests.get(search_url, headers=auth_header, params=dummy_params)
-            dummy_response.raise_for_status()
-            total_results = dummy_response.json().get('albums', {}).get('total', 1000)
-            app.logger.info(f"Total results for query '{search_query}': {total_results}")
-        except Exception as e:
-            app.logger.error(f"Error getting total results: {e}")
-            
-        max_possible_offset = min(total_results, 950) 
-        random_offset = 0
-        if max_possible_offset > 50:
-             random_offset = random.randint(0, max_possible_offset // 50) * 50
-        app.logger.info(f"Starting 'Records DK' scan at random offset: {random_offset}")
-
-        # Scan 10 pages (500 albums) from this search
-        next_url = search_url
-        params = {'q': search_query, 'type': 'album', 'limit': 50, 'offset': random_offset}
-        
-        # ** CHANGED to 10 pages **
-        for page in range(10): # 10 pages * 50 albums/page = 500 albums
-            if not next_url:
-                break
-            
-            app.logger.debug(f"Scanning 'Records DK' page {page + 1}...")
-            if page == 0:
-                response = requests.get(search_url, headers=auth_header, params=params)
-            else:
-                response = requests.get(next_url, headers=auth_header)
-                
-            response.raise_for_status()
-            data = response.json()
-            
-            for album in data.get('albums', {}).get('items', []):
-                if album and album.get('id'):
-                    all_album_ids.add(album['id'])
-            
-            next_url = data.get('albums', {}).get('next')
-            time.sleep(0.05) # Be nice to API
-
-    except Exception as e:
-        app.logger.error(f"ERROR during 'Records DK' search: {e}")
-
-    app.logger.info(f"Found {len(all_album_ids)} unique IDs from 'Records DK' search.")
-
-    # --- ** SEARCH 2: "New Releases" (Diverse) ** ---
+    # --- ** NEW: We will ONLY search the 'New Releases' endpoint ** ---
+    # This is the largest, most diverse, and most random pool.
+    # We are *removing* the 'label:"Records DK"' search as it's too small and static.
+    
     try:
         browse_url = 'https://api.spotify.com/v1/browse/new-releases'
-        next_url = browse_url
-        params = {'limit': 50}
+        params = {'limit': 50, 'country': 'US'} # Use US market
         
-        # ** CHANGED to 10 pages **
-        for page in range(10): # 10 pages * 50 albums/page = 500 albums
-            if not next_url:
-                break
-                
-            app.logger.debug(f"Scanning 'New Releases' page {page + 1}...")
-            if page == 0:
-                response = requests.get(browse_url, headers=auth_header, params=params)
-            else:
-                response = requests.get(next_url, headers=auth_header)
+        # ** NEW: Scan the maximum 20 pages (1000 albums) **
+        for page in range(20): # 20 pages * 50 albums/page = 1000 albums
             
-            response.raise_for_status()
-            data = response.json()
+            app.logger.debug(f"Scanning 'New Releases' page {page + 1}...")
+            # We need to manually handle pagination for /browse/new-releases
+            params['offset'] = page * 50
+            
+            try:
+                response = requests.get(browse_url, headers=auth_header, params=params)
+                response.raise_for_status()
+                data = response.json()
+            except requests.exceptions.HTTPError as err:
+                app.logger.error(f"Error on page {page+1} of new releases: {err}")
+                if response.status_code == 429: # Handle rate limiting
+                    retry_after = int(response.headers.get('Retry-After', 10))
+                    app.logger.warning(f"Rate limited. Waiting {retry_after}s...")
+                    time.sleep(retry_after)
+                    continue # Retry this page
+                else:
+                    continue # Skip this page on other errors
 
-            for album in data.get('albums', {}).get('items', []):
+            albums_page = data.get('albums', {}).get('items', [])
+            if not albums_page:
+                app.logger.info("No more albums found in new releases. Stopping.")
+                break # Stop if we run out of pages
+
+            for album in albums_page:
                 if album and album.get('id'):
                     all_album_ids.add(album['id'])
             
-            next_url = data.get('albums', {}).get('next')
             time.sleep(0.05) # Be nice to API
 
     except Exception as e:
