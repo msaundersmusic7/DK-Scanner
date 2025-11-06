@@ -220,7 +220,7 @@ def check_artist_most_recent_release(artist_id, token):
         return False
 
 
-# --- ** NEW API Route: /api/start_scan ** ---
+# --- ** UPDATED API Route: /api/start_scan ** ---
 @app.route('/api/start_scan')
 def start_scan():
     """
@@ -264,6 +264,7 @@ def start_scan():
         next_url = search_url
         params = {'q': search_query, 'type': 'album', 'limit': 50, 'offset': random_offset}
         
+        # ** CHANGED to 10 pages **
         for page in range(10): # 10 pages * 50 albums/page = 500 albums
             if not next_url:
                 break
@@ -295,6 +296,7 @@ def start_scan():
         next_url = browse_url
         params = {'limit': 50}
         
+        # ** CHANGED to 10 pages **
         for page in range(10): # 10 pages * 50 albums/page = 500 albums
             if not next_url:
                 break
