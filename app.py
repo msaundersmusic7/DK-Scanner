@@ -224,7 +224,7 @@ def check_artist_most_recent_release(artist_id, token):
 @app.route('/api/start_scan')
 def start_scan():
     """
-    STEP 1: Performs the initial search and returns a list of album IDs.
+    STEP 1: Performs multiple searches and returns a combined list of album IDs.
     This is fast and will not time out.
     """
     app.logger.info("Received scan request at /api/start_scan")
@@ -234,84 +234,92 @@ def start_scan():
         app.logger.warning("Token request failed. Sending auth error to client.")
         return jsonify({"error": "Authentication failed. Server credentials may be missing."}), 500
 
-    app.logger.info("Authentication successful. Starting album ID search...")
-    all_album_ids = []
-    
-    # Start with the base search URL
-    search_url = 'https://api.spotify.com/v1/search'
+    app.logger.info("Authentication successful. Starting combined album ID search...")
+    all_album_ids = set() # Use a set to avoid duplicates
     auth_header = {"Authorization": f"Bearer {token}"}
-    
-    page_count = 0
-    max_pages = 20 # Limit to 20 pages (1000 albums)
-    
-    # --- ** FINAL CORRECTED SEARCH LOGIC ** ---
-    total_results = 1000
-    search_query = 'label:"Records DK"' 
-    
-    try:
-        dummy_params = {'q': search_query, 'type': 'album', 'limit': 1}
-        dummy_response = requests.get(search_url, headers=auth_header, params=dummy_params)
-        dummy_response.raise_for_status()
-        total_results = dummy_response.json().get('albums', {}).get('total', 1000)
-        app.logger.info(f"Total results for query '{search_query}': {total_results}")
-    except Exception as e:
-        app.logger.error(f"Error getting total results: {e}")
-        
-    max_possible_offset = min(total_results, 950) 
-    random_offset = 0
-    if max_possible_offset > 50:
-         random_offset = random.randint(0, max_possible_offset // 50) * 50
-    app.logger.info(f"Starting scan at random offset: {random_offset}")
 
-    params = {
-        'q': search_query,
-        'type': 'album',
-        'limit': 50,       
-        'offset': random_offset
-    }
-    
-    next_url = search_url # For the first loop
-    
-    while next_url and page_count < max_pages:
+    # --- ** SEARCH 1: "Records DK" (Targeted) ** ---
+    try:
+        search_url = 'https://api.spotify.com/v1/search'
+        search_query = 'label:"Records DK"'
+        
+        # Get total results to find a random offset
+        total_results = 1000
         try:
-            # 1. SEARCH FOR ALBUMS (Simplified)
-            app.logger.debug(f"Scanning page {page_count + 1}...")
-            if page_count == 0:
+            dummy_params = {'q': search_query, 'type': 'album', 'limit': 1}
+            dummy_response = requests.get(search_url, headers=auth_header, params=dummy_params)
+            dummy_response.raise_for_status()
+            total_results = dummy_response.json().get('albums', {}).get('total', 1000)
+            app.logger.info(f"Total results for query '{search_query}': {total_results}")
+        except Exception as e:
+            app.logger.error(f"Error getting total results: {e}")
+            
+        max_possible_offset = min(total_results, 950) 
+        random_offset = 0
+        if max_possible_offset > 50:
+             random_offset = random.randint(0, max_possible_offset // 50) * 50
+        app.logger.info(f"Starting 'Records DK' scan at random offset: {random_offset}")
+
+        # Scan 10 pages (500 albums) from this search
+        next_url = search_url
+        params = {'q': search_query, 'type': 'album', 'limit': 50, 'offset': random_offset}
+        
+        for page in range(10): # 10 pages * 50 albums/page = 500 albums
+            if not next_url:
+                break
+            
+            app.logger.debug(f"Scanning 'Records DK' page {page + 1}...")
+            if page == 0:
                 response = requests.get(search_url, headers=auth_header, params=params)
             else:
                 response = requests.get(next_url, headers=auth_header)
+                
+            response.raise_for_status()
+            data = response.json()
             
-            if response.status_code == 429:
-                retry_after = int(response.headers.get('Retry-After', 10))
-                app.logger.warning(f"Rate limited. Waiting {retry_after}s...")
-                time.sleep(retry_after)
-                continue
+            for album in data.get('albums', {}).get('items', []):
+                if album and album.get('id'):
+                    all_album_ids.add(album['id'])
+            
+            next_url = data.get('albums', {}).get('next')
+            time.sleep(0.05) # Be nice to API
+
+    except Exception as e:
+        app.logger.error(f"ERROR during 'Records DK' search: {e}")
+
+    app.logger.info(f"Found {len(all_album_ids)} unique IDs from 'Records DK' search.")
+
+    # --- ** SEARCH 2: "New Releases" (Diverse) ** ---
+    try:
+        browse_url = 'https://api.spotify.com/v1/browse/new-releases'
+        next_url = browse_url
+        params = {'limit': 50}
+        
+        for page in range(10): # 10 pages * 50 albums/page = 500 albums
+            if not next_url:
+                break
+                
+            app.logger.debug(f"Scanning 'New Releases' page {page + 1}...")
+            if page == 0:
+                response = requests.get(browse_url, headers=auth_header, params=params)
+            else:
+                response = requests.get(next_url, headers=auth_header)
             
             response.raise_for_status()
             data = response.json()
-            simplified_albums = data.get('albums', {}).get('items', [])
-            
-            if not simplified_albums:
-                app.logger.info("No more albums found.")
-                break 
 
-            # Collect all album IDs from this page
-            album_ids = [album['id'] for album in simplified_albums if album and album.get('id')]
-            all_album_ids.extend(album_ids)
+            for album in data.get('albums', {}).get('items', []):
+                if album and album.get('id'):
+                    all_album_ids.add(album['id'])
             
-            page_count += 1
             next_url = data.get('albums', {}).get('next')
-            time.sleep(0.1) # Be nice to the API
+            time.sleep(0.05) # Be nice to API
 
-        except requests.exceptions.HTTPError as err:
-            app.logger.error(f"ERROR during search: {err}")
-            return jsonify({"error": f"Error during Spotify search: {err.response.text}"}), 500
-        except Exception as e:
-            app.logger.error(f"ERROR: An unexpected error occurred during search: {e}")
-            return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
+    except Exception as e:
+        app.logger.error(f"ERROR during 'New Releases' search: {e}")
 
-    app.logger.info(f"Initial search complete. Found {len(all_album_ids)} album IDs to process.")
-    return jsonify({"album_ids": all_album_ids})
+    app.logger.info(f"Initial search complete. Found {len(all_album_ids)} total unique album IDs to process.")
+    return jsonify({"album_ids": list(all_album_ids)})
 
 
 # --- ** NEW API Route: /api/get_details ** ---
