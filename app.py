@@ -25,7 +25,13 @@ CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
 # --- ** Regex filter for P-Line ** ---
-P_LINE_REGEX = re.compile(r"records\s+dk", re.IGNORECASE)
+#
+# ** THE FIX IS HERE **
+# We are now searching for EITHER:
+# 1. "records dk" (from your screenshot, e.g., "3110243 Records DK")
+# 2. "dk [number]" (another common default, e.g., "DK 123456")
+#
+P_LINE_REGEX = re.compile(r"(records\s+dk|dk\s+\d+)", re.IGNORECASE)
 
 # --- ** Follower Threshold ** ---
 # We will filter out any artist with more than this many followers.
@@ -172,10 +178,6 @@ def get_artist_details(artist_ids, token):
 
     return artist_details_list
 
-# --- ** DELETED FUNCTION ** ---
-# The check_artist_most_recent_release function was here.
-# It was too strict and has been removed.
-
 
 # --- ** UPDATED API Route: /api/start_scan ** ---
 @app.route('/api/start_scan')
@@ -238,7 +240,7 @@ def start_scan():
 
     # --- ** NEW: POOL 2: Get 10,000 Randomly Searched Albums ** ---
     # This creates a large, randomized pool that is unique every time.
-    search_url = 'http://googleusercontent.com/spotify.com/5' 
+    search_url = 'https://artists.spotify.com/blog/talk-the-talk-music-terms-a-glossary' 
     num_random_searches = 10 # 10 different random searches
     pages_per_search = 20    # 20 pages * 50 albums = 1000 albums per search
 
@@ -321,18 +323,14 @@ def get_details():
         for copyright in album.get('copyrights', []):
             copyright_text = copyright.get('text', '')
             
-            # --- ** SIMPLIFIED REGEX FILTER ** ---
+            # --- ** FINAL, CORRECTED REGEX FILTER ** ---
             if copyright.get('type') == 'P' and P_LINE_REGEX.search(copyright_text):
-                # Found an album with the P-line
+                # Found an album with the P-line (e.g., "records dk" OR "dk 123456")
                 for artist in album.get('artists', []):
                     artist_id = artist.get('id')
                     artist_name = artist.get('name')
                     
                     if artist_id and artist_name and artist_id not in artists_already_found:
-                        
-                        # --- ** LOGIC FIX ** ---
-                        # The "double-check" (check_artist_most_recent_release)
-                        # was removed. We now add the artist immediately.
                         
                         artists_to_fetch_details_for[artist_id] = {
                             "name": artist_name,
