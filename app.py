@@ -123,7 +123,7 @@ def scan_one_page():
     3. Returns any *new* artists found.
     """
     data = request.get_json()
-    page_index = data.get('page_index', 0)
+    page_index = data.get('page_index', 0) # We only use this for logging
     artists_already_found = data.get('artists_already_found', [])
     
     app.logger.info(f"--- Processing Page {page_index} ---")
@@ -140,29 +140,32 @@ def scan_one_page():
     
     try:
         # --- Step 1: Get 50 Album Summaries ---
-        # ** FAST, DIVERSE SEARCH POOL **
-        # We search for a random letter + the current year.
+        # ** THE FIX: **
+        # We perform 200 *different* searches.
+        # Each search is for 2 random letters + the year, and we *only* get the first page (offset 0).
+        # This completely avoids the 2000-result offset limit.
         
         search_url = 'https://api.spotify.com/v1/search'
-        random_char = random.choice(string.ascii_lowercase)
-        query = f"{random_char}* year:{current_year}"
+        char1 = random.choice(string.ascii_lowercase)
+        char2 = random.choice(string.ascii_lowercase)
+        query = f"{char1}{char2}* year:{current_year}"
         
         params = {
             'q': query,
             'type': 'album',
             'limit': 50,
-            'offset': page_index * 50, # We use the page index as the offset for *this query*
+            'offset': 0, # We *always* get the first page of a new random query
             'market': 'US'
         }
         
-        app.logger.debug(f"Running random search query: {query}, offset: {page_index * 50}")
+        app.logger.debug(f"Running random search query: {query}, offset: 0")
         response = requests.get(search_url, headers=auth_header, params=params)
         response.raise_for_status()
         data = response.json()
         albums_page = data.get('albums', {}).get('items', [])
 
         if not albums_page:
-            app.logger.info(f"Page {page_index}: No albums found for query, returning empty.")
+            app.logger.info(f"Page {page_index}: No albums found for query '{query}', returning empty.")
             return jsonify({"artists": []})
 
         for album in albums_page:
