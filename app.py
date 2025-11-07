@@ -8,8 +8,6 @@ from flask import Flask, jsonify, make_response, request
 from flask_cors import CORS
 import requests
 import logging
-# Import modules needed for parsing URLs
-from urllib.parse import urlparse, parse_qs
 
 # --- Flask App Setup ---
 app = Flask(__name__)
@@ -20,7 +18,6 @@ CORS(app)
 logging.basicConfig(level=logging.DEBUG)
 
 # --- Spotify API Credentials ---
-# Load credentials securely from environment variables
 CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
@@ -28,322 +25,204 @@ CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 # Searches for:
 # 1. "records dk" (e.g., "3110243 Records DK")
 # 2. "dk [number]" (e.g., "DK 123456")
-#
 P_LINE_REGEX = re.compile(r"(records\s+dk|dk\s+\d+)", re.IGNORECASE)
 
 # --- ** Follower Threshold ** ---
-# We will filter out any artist with more than this many followers.
 MAX_FOLLOWERS = 100000
 
+# --- ** Scan Configuration ** ---
+# 20 pages of "New Releases" + 180 pages of "Random Searches"
+# The frontend will loop this many times.
+PAGES_NEW_RELEASES = 20
+PAGES_RANDOM_SEARCH = 180 # 18 searches * 10 pages each
+PAGES_PER_RANDOM_SEARCH = 10 # We'll only scan the first 10 pages of a random query
 
 # --- Helper Function: Get Access Token ---
 def get_spotify_token():
-    """
-    Exchanges Client ID and Secret for a Spotify Access Token.
-    """
     app.logger.debug("Attempting to get Spotify token...")
-    
     if not CLIENT_ID or not CLIENT_SECRET:
         app.logger.error("CRITICAL: Missing SPOTIFY_CLIENT_ID or SPOTIFY_CLIENT_SECRET environment variables.")
         return None
 
-    # ** CORRECTED URL **
     auth_url = 'https://accounts.spotify.com/api/token'
-    
-    # Base64 encode the Client ID and Secret
     auth_string = f"{CLIENT_ID}:{CLIENT_SECRET}"
     auth_bytes = auth_string.encode('utf-8')
     auth_base64 = base64.b64encode(auth_bytes).decode('utf-8')
-
-    headers = {
-        "Authorization": f"Basic {auth_base64}",
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
+    headers = {"Authorization": f"Basic {auth_base64}", "Content-Type": "application/x-www-form-urlencoded"}
     data = {"grant_type": "client_credentials"}
     
     try:
         response = requests.post(auth_url, headers=headers, data=data)
-        response.raise_for_status()  # Raises an error for bad responses (4xx, 5xx)
+        response.raise_for_status()
         token = response.json().get('access_token')
-        
         if not token:
             app.logger.error("Authentication succeeded but no token was returned.")
             return None
-            
         app.logger.debug("Successfully retrieved Spotify token.")
         return token
-        
-    except requests.exceptions.HTTPError as err:
-        app.logger.error(f"HTTP error during authentication: {err}")
-        app.logger.error(f"Response body: {err.response.text}")
-        return None
     except Exception as e:
         app.logger.error(f"An unexpected error occurred during authentication: {e}")
         return None
 
 # --- Helper Function: Get Full Album Details ---
 def get_full_album_details(album_ids, token):
-    """
-    Fetches full album details for a list of album IDs.
-    """
     if not album_ids:
         return []
-        
-    # ** CORRECTED URL **
-    albums_url = 'https://api.spotify.com/v1/albums' 
-    
+    albums_url = 'https://api.spotify.com/v1/albums'
+    auth_header = {"Authorization": f"Bearer {token}"}
     full_album_list = []
     
-    # Split album_ids into chunks of 20 (Spotify's max for this endpoint)
     for i in range(0, len(album_ids), 20):
         chunk = album_ids[i:i + 20]
-        
-        params = {
-            'ids': ','.join(chunk) # Spotify API takes a comma-separated string of IDs
-        }
-        auth_header = {"Authorization": f"Bearer {token}"}
-        
+        params = {'ids': ','.join(chunk)}
         try:
             response = requests.get(albums_url, headers=auth_header, params=params)
-            
             if response.status_code == 429:
                 retry_after = int(response.headers.get('Retry-After', 10))
                 app.logger.warning(f"Rate limited getting album details. Waiting {retry_after}s...")
                 time.sleep(retry_after)
-                # Re-run this chunk
                 response = requests.get(albums_url, headers=auth_header, params=params)
-
             response.raise_for_status()
             data = response.json()
             full_album_list.extend(data.get('albums', []))
-        
-        except requests.exceptions.HTTPError as err:
-            app.logger.error(f"HTTP error getting full album details: {err}")
         except Exception as e:
             app.logger.error(f"Unexpected error in get_full_album_details: {e}")
-            
     return full_album_list
-
 
 # --- Helper Function to Get Artist Details ** ---
 def get_artist_details(artist_ids, token):
-    """
-    Fetches full artist details (followers, popularity) for a list of artist IDs.
-    """
     if not artist_ids:
         return []
-
-    # ** CORRECTED URL **
     artists_url = 'https://api.spotify.com/v1/artists'
     auth_header = {"Authorization": f"Bearer {token}"}
-    
     artist_details_list = []
-
-    # Split artist_ids into chunks of 50 (Spotify's max for this endpoint)
+    
     for i in range(0, len(artist_ids), 50):
         chunk = artist_ids[i:i + 50]
         params = {'ids': ','.join(chunk)}
-        
         try:
             response = requests.get(artists_url, headers=auth_header, params=params)
-            
             if response.status_code == 429:
                 retry_after = int(response.headers.get('Retry-After', 10))
                 app.logger.warning(f"Rate limited getting artist details. Waiting {retry_after}s...")
                 time.sleep(retry_after)
-                # Re-run this chunk
                 response = requests.get(artists_url, headers=auth_header, params=params)
-
             response.raise_for_status()
             data = response.json()
             artist_details_list.extend(data.get('artists', []))
-        
-        except requests.exceptions.HTTPError as err:
-            app.logger.error(f"HTTP error getting artist details: {err}")
         except Exception as e:
             app.logger.error(f"Unexpected error in get_artist_details: {e}")
-
     return artist_details_list
 
-
-# --- ** UPDATED API Route: /api/start_scan ** ---
-@app.route('/api/start_scan')
-def start_scan():
+# --- ** NEW UNIFIED API Route: /api/scan_one_page ** ---
+@app.route('/api/scan_one_page', methods=['POST'])
+def scan_one_page():
     """
-    STEP 1: Performs multiple searches and returns a combined list of album IDs.
+    Receives a page index from the frontend.
+    1. Fetches ONE page (50 albums) of results.
+    2. Processes just those 50.
+    3. Returns any *new* artists found.
+    This is called ~200 times by the frontend and will not time out.
     """
-    app.logger.info("Received scan request at /api/start_scan")
-    token = get_spotify_token()
+    data = request.get_json()
+    page_index = data.get('page_index', 0)
+    artists_already_found = data.get('artists_already_found', [])
     
+    app.logger.info(f"--- Processing Page {page_index} ---")
+
+    token = get_spotify_token()
     if not token:
-        app.logger.warning("Token request failed. Sending auth error to client.")
         return jsonify({"error": "Authentication failed. Server credentials may be missing."}), 500
 
-    app.logger.info("Authentication successful. Starting combined album ID search...")
-    all_album_ids = set() # Use a set to avoid duplicates
     auth_header = {"Authorization": f"Bearer {token}"}
-
-    # --- ** POOL 1: Get 1000 'New Releases' (Static but good) ** ---
+    album_ids_from_page = set()
+    
     try:
-        # ** CORRECTED URL **
-        browse_url = 'https://api.spotify.com/v1/browse/new-releases'
-        params = {'limit': 50, 'country': 'US'} # Use US market
-        
-        # Scan the maximum 20 pages (1000 albums)
-        for page in range(20): # 20 pages * 50 albums/page = 1000 albums
-            
-            app.logger.debug(f"Scanning 'New Releases' page {page + 1}/20...")
-            params['offset'] = page * 50
-            
-            try:
-                response = requests.get(browse_url, headers=auth_header, params=params)
-                response.raise_for_status()
-                data = response.json()
-            except requests.exceptions.HTTPError as err:
-                app.logger.error(f"Error on page {page+1} of new releases: {err}")
-                if response.status_code == 429: # Handle rate limiting
-                    retry_after = int(response.headers.get('Retry-After', 10))
-                    app.logger.warning(f"Rate limited. Waiting {retry_after}s...")
-                    time.sleep(retry_after)
-                    continue # Retry this page
-                else:
-                    continue # Skip this page on other errors
-
+        # --- Step 1: Get 50 Album Summaries ---
+        if page_index < PAGES_NEW_RELEASES:
+            # We are scanning "New Releases"
+            browse_url = 'https://api.spotify.com/v1/browse/new-releases'
+            params = {'limit': 50, 'country': 'US', 'offset': page_index * 50}
+            response = requests.get(browse_url, headers=auth_header, params=params)
+            response.raise_for_status()
+            data = response.json()
             albums_page = data.get('albums', {}).get('items', [])
-            if not albums_page:
-                app.logger.info("No more albums found in new releases. Stopping.")
-                break # Stop if we run out of pages
-
-            for album in albums_page:
-                if album and album.get('id'):
-                    all_album_ids.add(album['id'])
             
-            time.sleep(0.05) # Be nice to API
-
-    except Exception as e:
-        app.logger.error(f"ERROR during 'New Releases' search: {e}")
-
-    app.logger.info(f"Found {len(all_album_ids)} albums from 'New Releases'.")
-
-    # --- ** NEW: POOL 2: Get 10,000 Randomly Searched Albums ** ---
-    # ** CORRECTED URL **
-    search_url = 'https://api.spotify.com/v1/search' 
-    num_random_searches = 10 # 10 different random searches
-    pages_per_search = 20    # 20 pages * 50 albums = 1000 albums per search
-
-    app.logger.info(f"Starting {num_random_searches} random searches...")
-
-    for i in range(num_random_searches):
-        # Create a random search query (e.g., "a*", "b*", etc.)
-        random_char = random.choice(string.ascii_lowercase)
-        query = f"{random_char}*"
-        
-        app.logger.debug(f"Running random search {i+1}/{num_random_searches} (query: {query})")
-        
-        for page in range(pages_per_search):
+        else:
+            # We are scanning a random page
+            search_url = 'https://api.spotify.com/v1/search'
+            random_char = random.choice(string.ascii_lowercase)
+            
+            # This logic finds one of 10 pages from a random letter search
+            page_offset = (page_index - PAGES_NEW_RELEASES) % PAGES_PER_RANDOM_SEARCH
+            
             params = {
-                'q': query,
+                'q': f"{random_char}*",
                 'type': 'album',
                 'limit': 50,
-                'offset': page * 50,
+                'offset': page_offset * 50, # 0, 50, 100...
                 'market': 'US'
             }
-            try:
-                response = requests.get(search_url, headers=auth_header, params=params)
-                response.raise_for_status()
-                data = response.json()
-            
-            except requests.exceptions.HTTPError as err:
-                app.logger.error(f"Error on page {page+1} of random search '{query}': {err}")
-                if response.status_code == 429: # Handle rate limiting
-                    retry_after = int(response.headers.get('Retry-After', 10))
-                    app.logger.warning(f"Rate limited. Waiting {retry_after}s...")
-                    time.sleep(retry_after)
-                    continue # Retry this page
-                else:
-                    continue # Skip this page on other errors
-            
+            response = requests.get(search_url, headers=auth_header, params=params)
+            response.raise_for_status()
+            data = response.json()
             albums_page = data.get('albums', {}).get('items', [])
-            if not albums_page:
-                app.logger.info(f"No more albums found for query '{query}'. Moving to next search.")
-                break # Stop if we run out of pages
 
-            for album in albums_page:
-                if album and album.get('id'):
-                    all_album_ids.add(album['id'])
-            
-            time.sleep(0.05) # Be nice to API
+        if not albums_page:
+            app.logger.info(f"Page {page_index}: No albums found, returning empty.")
+            return jsonify({"artists": []})
 
-    app.logger.info(f"Initial search complete. Found {len(all_album_ids)} total unique album IDs to process.")
-    return jsonify({"album_ids": list(all_album_ids)})
-
-
-# --- ** NEW API Route: /api/get_details ** ---
-@app.route('/api/get_details', methods=['POST'])
-def get_details():
-    """
-    STEP 2: Receives a list of album IDs from the frontend,
-    filters them, and returns any artists found.
-    """
-    app.logger.info("Received request at /api/get_details")
-    data = request.get_json()
-    album_ids = data.get('album_ids')
-    artists_already_found = data.get('artists_already_found', [])
-
-    if not album_ids:
-        app.logger.error("No album IDs provided to /api/get_details")
-        return jsonify({"error": "No album IDs provided"}), 400
-
-    token = get_spotify_token()
-    if not token:
-        return jsonify({"error": "Authentication failed. Server credentials may be missing."}), 500
-
-    artists_to_fetch_details_for = {} # {id: {name, url}}
+        for album in albums_page:
+            if album and album.get('id'):
+                album_ids_from_page.add(album['id'])
     
-    # 1. GET FULL ALBUM DETAILS (with Copyrights)
-    app.logger.debug(f"Getting full details for {len(album_ids)} albums...")
-    full_albums = get_full_album_details(album_ids, token)
+    except requests.exceptions.HTTPError as err:
+        app.logger.error(f"HTTP error getting album summaries: {err}")
+        return jsonify({"artists": []}) # Return empty, let frontend continue
+    except Exception as e:
+        app.logger.error(f"Unexpected error getting album summaries: {e}")
+        return jsonify({"artists": []})
 
-    # 2. FILTER THE FULL ALBUM DETAILS
+    if not album_ids_from_page:
+        return jsonify({"artists": []})
+
+    # --- Step 2: Get Full Details for these 50 Albums ---
+    full_albums = get_full_album_details(list(album_ids_from_page), token)
+    if not full_albums:
+        return jsonify({"artists": []})
+
+    # --- Step 3: Filter Albums for P-Line ---
+    artists_to_fetch_details_for = {}
     for album in full_albums:
         if not album: continue
         for copyright in album.get('copyrights', []):
             copyright_text = copyright.get('text', '')
-            
-            # --- ** FINAL, CORRECTED REGEX FILTER ** ---
             if copyright.get('type') == 'P' and P_LINE_REGEX.search(copyright_text):
-                # Found an album with the P-line (e.g., "records dk" OR "dk 123456")
                 for artist in album.get('artists', []):
                     artist_id = artist.get('id')
                     artist_name = artist.get('name')
-                    
                     if artist_id and artist_name and artist_id not in artists_already_found:
-                        
                         artists_to_fetch_details_for[artist_id] = {
                             "name": artist_name,
                             "url": artist.get('external_urls', {}).get('spotify')
                         }
-                
-                break # Found a match, move to the next album
-    
-    if not artists_to_fetch_details_for:
-        app.logger.info("Chunk processed. Found 0 new artists.")
-        return jsonify({"artists": []}) # Return empty list, not an error
+                break # Found match, move to next album
 
-    # 3. GET POPULARITY AND FOLLOWERS
-    app.logger.info(f"Chunk processed. Found {len(artists_to_fetch_details_for)} new artists. Now fetching details...")
+    if not artists_to_fetch_details_for:
+        app.logger.info(f"Page {page_index}: Found P-lines, but no *new* artists.")
+        return jsonify({"artists": []})
+
+    # --- Step 4: Get Artist Details & Filter by Followers ---
     artist_ids_list = list(artists_to_fetch_details_for.keys())
     detailed_artists = get_artist_details(artist_ids_list, token)
-
     final_artist_list = []
+    
     for artist_data in detailed_artists:
         if not artist_data: continue
         artist_id = artist_data.get('id')
         base_info = artists_to_fetch_details_for.get(artist_id)
         if base_info:
             artist_followers = artist_data.get('followers', {}).get('total', 0)
-            
-            # 4. FILTER BY FOLLOWER CAP
             if artist_followers < MAX_FOLLOWERS:
                 final_artist_list.append({
                     "name": base_info['name'],
@@ -355,28 +234,22 @@ def get_details():
             else:
                  app.logger.info(f"Filtering out artist: {base_info['name']} (Followers: {artist_followers})")
 
-    app.logger.info(f"Returning {len(final_artist_list)} artists to frontend.")
+    app.logger.info(f"Page {page_index}: Found {len(final_artist_list)} new artists.")
     return jsonify({"artists": final_artist_list})
 
 
 # --- Frontend Route: / ---
 @app.route('/')
 def serve_frontend():
-    """
-    Serves the main spotify_scanner.html file.
-    """
     app.logger.info("Serving frontend HTML at /")
     try:
-        # Assumes spotify_scanner.html is in the SAME directory as app.py
         with open('spotify_scanner.html', 'r', encoding='utf-8') as f:
             html_content = f.read()
         return make_response(html_content)
     except FileNotFoundError:
         app.logger.error("CRITICAL: spotify_scanner.html not found in root directory.")
-        return "Error: Could not find frontend HTML file. Make sure spotify_scanner.html is in the root of your repository.", 404
+        return "Error: Could not find frontend HTML file.", 404
 
 # --- Main entry point to run the app ---
 if __name__ == '__main__':
-    # Gunicorn (which Render uses) will not run this block.
-    # This is only for local testing.
     app.run(debug=True, port=5000)

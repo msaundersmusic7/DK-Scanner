@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Spotify 'DK' Label Scanner</title>
-    <!-- Load Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         /* Simple loading spinner */
@@ -20,41 +19,21 @@
             to { transform: rotate(360deg); }
         }
         /* Custom scrollbar for results */
-        #results-table-body::-webkit-scrollbar {
-            width: 8px;
-        }
-        #results-table-body::-webkit-scrollbar-track {
-            background: #282828; /* Spotify dark gray */
-            border-radius: 10px;
-        }
-        #results-table-body::-webkit-scrollbar-thumb {
-            background: #535353; /* Spotify light gray */
-            border-radius: 10px;
-        }
-        #results-table-body::-webkit-scrollbar-thumb:hover {
-            background: #b3b3b3; /* Spotify hover gray */
-        }
+        #results-table-body::-webkit-scrollbar { width: 8px; }
+        #results-table-body::-webkit-scrollbar-track { background: #282828; border-radius: 10px; }
+        #results-table-body::-webkit-scrollbar-thumb { background: #535353; border-radius: 10px; }
+        #results-table-body::-webkit-scrollbar-thumb:hover { background: #b3b3b3; }
         /* Table styles */
-        th {
-            cursor: pointer;
-            user-select: none;
-        }
-        th:hover {
-            color: #1ed760;
-        }
-        .sort-asc::after {
-            content: ' ▲';
-        }
-        .sort-desc::after {
-            content: ' ▼';
-        }
+        th { cursor: pointer; user-select: none; }
+        th:hover { color: #1ed760; }
+        .sort-asc::after { content: ' ▲'; }
+        .sort-desc::after { content: ' ▼'; }
     </style>
 </head>
 <body class="bg-black text-gray-100 font-sans p-6 min-h-screen">
     <div class="max-w-4xl mx-auto">
         
         <div class="flex items-center justify-center mb-6">
-            <!-- Spotify Logo SVG -->
             <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#1ed760" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="10"></circle>
                 <path d="M4.93 4.93c7.07 7.07 7.07 18.38 0 25.45"></path>
@@ -63,9 +42,8 @@
             </svg>
             <h1 class="text-3xl font-bold text-center ml-3">Spotify 'DK' Scanner</h1>
         </div>
-        <p class="text-gray-400 text-center mb-8">Finds artists whose most recent release uses the default 'Records DK' P-Line (℗).</p>
+        <p class="text-gray-400 text-center mb-8">Finds artists using the default 'Records DK' P-Line (℗).</p>
 
-        <!-- Step 1: Run -->
         <div class="text-center mb-6">
             <button id="start-scan" class="w-full bg-green-600 hover:bg-green-700 text-black font-bold py-3 px-6 rounded-full shadow-md transition duration-200 flex items-center justify-center">
                 <span id="button-text">Start New Scan</span>
@@ -73,7 +51,6 @@
             </button>
         </div>
 
-        <!-- Step 2: Results -->
         <div id="results-container" class="bg-gray-900 border border-gray-800 p-6 rounded-lg shadow-lg hidden">
             <div class="flex justify-between items-center mb-4">
                 <h2 class="text-xl font-semibold">Results</h2>
@@ -92,7 +69,6 @@
             
             <div id="status" class="text-gray-400 mb-4">Idle. Click "Start Scan" to begin.</div>
             
-            <!-- This is now a table -->
             <div classV="w-full h-96 overflow-y-auto">
                 <table class="min-w-full divide-y divide-gray-700">
                     <thead class="bg-gray-800 sticky top-0">
@@ -103,7 +79,6 @@
                         </tr>
                     </thead>
                     <tbody id="results-table-body" class="bg-gray-900 divide-y divide-gray-800">
-                        <!-- Rows will be injected here by JS -->
                         <tr>
                             <td colspan="3" class="px-6 py-4 text-center text-gray-500">Found artists will appear here...</td>
                         </tr>
@@ -125,25 +100,24 @@
         const downloadButton = document.getElementById('download-results');
         const sortPopularityButton = document.getElementById('sort-popularity');
         const sortFollowersButton = document.getElementById('sort-followers');
-        
-        // Table header sort buttons
         const sortNameHeader = document.getElementById('sort-name');
         const sortFollowersHeader = document.getElementById('sort-followers-col');
         const sortPopularityHeader = document.getElementById('sort-popularity-col');
 
 
         // --- App State ---
-        let allArtists = []; // This will now be an array of objects
-        // ** NEW: Set to track artist IDs and prevent duplicates **
+        let allArtists = []; 
         let artistsAlreadyFound = new Set(); 
         let isScanning = false;
         let currentSort = { key: 'name', asc: true };
+        
+        // ** NEW: Total pages to scan **
+        // 20 "New Release" pages + 180 "Random Search" pages = 200 total requests
+        const TOTAL_PAGES_TO_SCAN = 200; 
 
         // --- Event Listeners ---
         startButton.addEventListener('click', handleStartScan);
         downloadButton.addEventListener('click', downloadResults);
-        
-        // --- ** NEW: Sort Listeners ** ---
         sortPopularityButton.addEventListener('click', () => sortAndRender('popularity', false));
         sortFollowersButton.addEventListener('click', () => sortAndRender('followers', false));
         sortNameHeader.addEventListener('click', () => sortAndRender('name', !currentSort.asc));
@@ -151,14 +125,14 @@
         sortPopularityHeader.addEventListener('click', () => sortAndRender('popularity', !currentSort.asc));
 
         
-        // --- ** NEW: Main Scan Function (Chunking) ** ---
+        // --- ** NEW: Main Scan Function (Page-by-Page) ** ---
         async function handleStartScan() {
             if (isScanning) return;
             
             // --- Reset UI ---
             isScanning = true;
             allArtists = [];
-            artistsAlreadyFound.clear(); // ** NEW: Clear duplicate checker **
+            artistsAlreadyFound.clear(); 
             resultsTableBody.innerHTML = `<tr><td colspan="3" class="px-6 py-4 text-center text-gray-500">Scanning, please wait...</td></tr>`;
             resultsContainer.classList.remove('hidden');
             downloadButton.classList.add('hidden');
@@ -167,55 +141,41 @@
             startButton.disabled = true;
             startButton.classList.add('opacity-50', 'cursor-not-allowed');
 
-            try {
-                // --- ** STEP 1: Get the full list of album IDs to scan ** ---
-                updateStatus("Step 1/2: Finding candidate albums from Spotify...");
-                const startScanUrl = '/api/start_scan'; 
-                const response = await fetch(startScanUrl);
-                if (!response.ok) throw new Error(await getErrorMessage(response));
-                
-                const data = await response.json();
-                const albumIds = data.album_ids || [];
-                
-                if (albumIds.length === 0) {
-                    updateStatus("Scan complete! Found 0 candidate albums. Try scanning again for new results.");
-                    resultsTableBody.innerHTML = `<tr><td colspan="3" class="px-6 py-4 text-center text-gray-500">No artists were found matching the criteria. Try scanning again for new results.</td></tr>`;
-                    stopLoading();
-                    return;
-                }
+            let totalArtistsFound = 0;
 
-                updateStatus(`Step 1 complete! Found ${albumIds.length} albums. Now scanning them for artists...`);
+            try {
                 resultsTableBody.innerHTML = ''; // Clear "Scanning..." message
                 
-                // --- ** STEP 2: Scan the IDs in chunks of 20 ** ---
-                const chunkSize = 20;
-                let totalArtistsFound = 0;
-                
-                for (let i = 0; i < albumIds.length; i += chunkSize) {
-                    const chunk = albumIds.slice(i, i + chunkSize);
+                // --- ** NEW: Loop from 0 to TOTAL_PAGES_TO_SCAN ** ---
+                for (let i = 0; i < TOTAL_PAGES_TO_SCAN; i++) {
                     
                     // Update status for user
-                    const percent = Math.round(((i + chunkSize) / albumIds.length) * 100);
-                    updateStatus(`Step 2/2: Processing albums... ${percent > 100 ? 100 : percent}% complete. (Found ${totalArtistsFound} so far)`);
+                    const percent = Math.round(((i + 1) / TOTAL_PAGES_TO_SCAN) * 100);
+                    updateStatus(`Scanning... ${percent}% complete. (Page ${i + 1}/${TOTAL_PAGES_TO_SCAN} | Found ${totalArtistsFound} so far)`);
                     
-                    const detailsUrl = '/api/get_details';
-                    const chunkResponse = await fetch(detailsUrl, {
+                    const scanUrl = '/api/scan_one_page';
+                    
+                    const response = await fetch(scanUrl, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        // ** NEW: Send the list of artists we've already found **
                         body: JSON.stringify({ 
-                            album_ids: chunk,
+                            page_index: i,
                             artists_already_found: Array.from(artistsAlreadyFound)
                         })
                     });
                     
-                    if (!chunkResponse.ok) throw new Error(await getErrorMessage(chunkResponse));
+                    if (!response.ok) {
+                        // Don't stop the whole scan, just log this page error
+                        console.error(`Error on page ${i}: ${await getErrorMessage(response)}`);
+                        continue; // Skip to the next page
+                    }
 
-                    const chunkData = await chunkResponse.json();
-                    const newArtists = chunkData.artists || [];
+                    const data = await response.json();
+                    const newArtists = data.artists || [];
                     
                     if (newArtists.length > 0) {
                         newArtists.forEach(artist => {
+                            // Double-check just in case
                             if (!artistsAlreadyFound.has(artist.id)) {
                                 allArtists.push(artist);
                                 artistsAlreadyFound.add(artist.id);
@@ -246,7 +206,6 @@
             }
         }
         
-        // --- ** NEW: Helper to stop loading state ** ---
         function stopLoading() {
             isScanning = false;
             loadingSpinner.classList.add('hidden');
@@ -255,7 +214,6 @@
             startButton.classList.remove('opacity-50', 'cursor-not-allowed');
         }
 
-        // --- ** NEW: Helper to parse error messages ** ---
         async function getErrorMessage(response) {
             let errorMsg;
             try {
@@ -267,29 +225,22 @@
             return errorMsg || `Server responded with status ${response.status}`;
         }
         
-        // --- ** NEW: Sort and Render Functions ** ---
         
         function sortAndRender(key, asc) {
             currentSort = { key, asc };
             
-            // Sort the data
             allArtists.sort((a, b) => {
                 let valA = a[key];
                 let valB = b[key];
-                
                 if (key === 'name') {
-                    // String comparison
                     return asc ? valA.localeCompare(valB) : valB.localeCompare(valA);
                 } else {
-                    // Number comparison
                     return asc ? valA - valB : valB - valA;
                 }
             });
             
-            // Re-render the table
             renderTable();
             
-            // Update header styles
             [sortNameHeader, sortFollowersHeader, sortPopularityHeader].forEach(th => {
                 th.classList.remove('sort-asc', 'sort-desc');
             });
@@ -308,15 +259,13 @@
             resultsTableBody.innerHTML = ''; // Clear the table
             
             if (allArtists.length === 0) {
-                 resultsTableBody.innerHTML = `<tr><td colspan="3" class="px-6 py-4 text-center text-gray-500">No artists were found matching the criteria.</td></tr>`;
+                 resultsTableBody.innerHTML = `<tr><td colspan="3" class="px-6 py-4 text-center text-gray-500">Scanning...</td></tr>`;
                  return;
             }
             
             allArtists.forEach(artist => {
                 const row = document.createElement('tr');
                 row.className = "hover:bg-gray-800";
-                
-                // Format numbers with commas
                 const followersFormatted = artist.followers.toLocaleString();
                 
                 row.innerHTML = `
@@ -333,10 +282,8 @@
         }
 
         function downloadResults() {
-            // Format the text file to include all new data
             let text = "Artist Name\tFollowers\tPopularity\tSpotify URL\n"; // Header row
             text += allArtists.map(artist => {
-                // ** NEW: Artist object includes ID now, but we don't need it in the TXT **
                 return `${artist.name}\t${artist.followers}\t${artist.popularity}\t${artist.url}`
             }).join('\n');
             
@@ -348,7 +295,6 @@
             window.URL.revokeObjectURL(anchor.href);
         }
 
-        // --- UI Helper Functions ---
         function updateStatus(message) {
             statusEl.textContent = message;
             statusEl.classList.remove('text-red-400');
@@ -357,8 +303,6 @@
         function showError(message) {
             statusEl.textContent = `Error: ${message}`;
             statusEl.classList.add('text-red-400');
-            
-            // Stop loading/scanning state
             stopLoading();
         }
     </script>
