@@ -1,8 +1,8 @@
 import os
 import base64
 import time
-import random  # <-- NEW
-import string  # <-- NEW
+import random
+import string
 import re
 from flask import Flask, jsonify, make_response, request
 from flask_cors import CORS
@@ -25,9 +25,12 @@ CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
 # --- ** Stricter Regex filter for P-Line ** ---
-# This looks for one or more digits (\d+), followed by a space (\s+),
-# followed by "records dk". This is the strict pattern we need.
-P_LINE_REGEX = re.compile(r"\d+\s+records\s+dk", re.IGNORECASE)
+#
+# ** THE FIX IS HERE **
+# Old: re.compile(r"\d+\s+records\s+dk", re.IGNORECASE)
+# New: Just looks for the phrase "records dk"
+#
+P_LINE_REGEX = re.compile(r"records\s+dk", re.IGNORECASE)
 
 # --- ** Follower Threshold ** ---
 # We will filter out any artist with more than this many followers.
@@ -205,7 +208,7 @@ def check_artist_most_recent_release(artist_id, token):
             app.logger.warning(f"Could not get details for recent album {most_recent_album_id}")
             return False
 
-        # 3. Check its P-line
+        # 3. Check its P-line (using the CORRECTED regex)
         for copyright in full_album_details[0].get('copyrights', []):
             copyright_text = copyright.get('text', '')
             if copyright.get('type') == 'P' and P_LINE_REGEX.search(copyright_text):
@@ -365,8 +368,9 @@ def get_details():
         for copyright in album.get('copyrights', []):
             copyright_text = copyright.get('text', '') # No .lower() needed for regex
             
-            # --- ** FINAL, STRICT REGEX FILTER ** ---
+            # --- ** FINAL, CORRECTED REGEX FILTER ** ---
             if copyright.get('type') == 'P' and P_LINE_REGEX.search(copyright_text):
+                # Found an album with the P-line
                 for artist in album.get('artists', []):
                     artist_id = artist.get('id')
                     artist_name = artist.get('name')
@@ -376,6 +380,7 @@ def get_details():
                         
                         # ** NEW: Check artist's most recent release **
                         if check_artist_most_recent_release(artist_id, token):
+                            # This function also uses the CORRECTED regex
                             artists_to_fetch_details_for[artist_id] = {
                                 "name": artist_name,
                                 "url": artist.get('external_urls', {}).get('spotify')
