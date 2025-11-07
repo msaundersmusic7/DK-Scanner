@@ -108,65 +108,19 @@ def get_artist_details(artist_ids, token):
             app.logger.error(f"Unexpected error in get_artist_details: {e}")
     return artist_details_list
 
-# --- ** NEW: Helper Function to Check Artist's Most Recent Release ** ---
-def check_artist_most_recent_release(artist_id, token):
-    """
-    Gets the artist's most recent album/single and checks its P-line.
-    Returns True if it matches the regex, False otherwise.
-    """
-    try:
-        # 1. Get the artist's most recent album or single
-        url = f"https://api.spotify.com/v1/artists/{artist_id}/albums"
-        params = {
-            'include_groups': 'album,single',
-            'limit': 1,
-            'country': 'US' # Use US market as a standard
-        }
-        headers = {"Authorization": f"Bearer {token}"}
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        
-        data = response.json()
-        if not data.get('items'):
-            app.logger.warning(f"Artist {artist_id} has no recent items to check.")
-            return False # Artist has no albums
-            
-        most_recent_album_id = data['items'][0]['id']
+# --- ** DELETED FUNCTION ** ---
+# The check_artist_most_recent_release function was here.
+# It was removed because it was causing 30-second timeouts.
 
-        # 2. Get the *full details* of that one album
-        full_album_details_list = get_full_album_details([most_recent_album_id], token)
-        if not full_album_details_list:
-            app.logger.warning(f"Could not get details for recent album {most_recent_album_id}")
-            return False
-
-        full_album_details = full_album_details_list[0]
-        if not full_album_details:
-             app.logger.warning(f"Album details for {most_recent_album_id} were empty.")
-             return False
-
-        # 3. Check its P-line
-        for copyright in full_album_details.get('copyrights', []):
-            copyright_text = copyright.get('text', '')
-            if copyright.get('type') == 'P' and P_LINE_REGEX.search(copyright_text):
-                app.logger.info(f"CONFIRMED: Artist {artist_id} most recent release has DK P-line.")
-                return True # Found a match
-
-        app.logger.info(f"REJECTED: Artist {artist_id} most recent release does NOT have DK P-line.")
-        return False # No P-line match on most recent release
-        
-    except Exception as e:
-        app.logger.error(f"Error checking recent release for artist {artist_id}: {e}")
-        return False
 
 # --- ** NEW UNIFIED API Route: /api/scan_one_page ** ---
 @app.route('/api/scan_one_page', methods=['POST'])
 def scan_one_page():
     """
     Receives a page index from the frontend.
-    1. Fetches ONE page (50 albums) using a targeted search.
+    1. Fetches ONE page (50 albums) of random, recent releases.
     2. Processes just those 50.
-    3. Verifies artist's *newest* release.
-    4. Returns any *new* artists found.
+    3. Returns any *new* artists found.
     """
     data = request.get_json()
     page_index = data.get('page_index', 0)
@@ -181,30 +135,37 @@ def scan_one_page():
     auth_header = {"Authorization": f"Bearer {token}"}
     album_ids_from_page = set()
     
+    # Get current year for filtering
+    current_year = datetime.datetime.now().year
+    
     try:
         # --- Step 1: Get 50 Album Summaries ---
-        # ** FUNDAMENTAL FIX: **
-        # We are no longer searching 'tag:new'.
-        # We are searching directly for 'label:"Records DK"'
+        # ** THE FINAL SEARCH LOGIC **
+        # We search for a random letter + the current year.
+        # This creates a massive, diverse pool of *recent* albums.
         
         search_url = 'https://api.spotify.com/v1/search'
+        random_char = random.choice(string.ascii_lowercase)
+        query = f"{random_char}* year:{current_year}"
         
         params = {
-            'q': 'label:"Records DK"',
+            'q': query,
             'type': 'album',
             'limit': 50,
-            'offset': page_index * 50, # page 0 -> offset 0, page 1 -> offset 50
+            'offset': page_index * 50, # We use the page index as the offset for *this query*
             'market': 'US'
         }
         
-        app.logger.debug(f"Running 'label:\"Records DK\"' search with offset: {page_index * 50}")
+        # Note: We are no longer using 'label:"Records DK"' as it was incorrect.
+        app.logger.debug(f"Running random search query: {query}, offset: {page_index * 50}")
         response = requests.get(search_url, headers=auth_header, params=params)
         response.raise_for_status()
         data = response.json()
         albums_page = data.get('albums', {}).get('items', [])
 
         if not albums_page:
-            app.logger.info(f"Page {page_index}: No albums found, returning empty.")
+            # This is normal, a random search for "x* year:2025" might have 0 results
+            app.logger.info(f"Page {page_index}: No albums found for query, returning empty.")
             return jsonify({"artists": []})
 
         for album in albums_page:
@@ -226,14 +187,14 @@ def scan_one_page():
     if not full_albums:
         return jsonify({"artists": []})
 
-    # --- Step 3: Filter Albums for P-Line AND Verify Newest Release ---
+    # --- Step 3: Filter Albums for P-Line ---
     artists_to_fetch_details_for = {}
     for album in full_albums:
         if not album: continue
         for copyright in album.get('copyrights', []):
             copyright_text = copyright.get('text', '')
             
-            # Check if the *found album* has the P-line
+            # ** We are now scanning the P-LINE (copyright) **
             if copyright.get('type') == 'P' and P_LINE_REGEX.search(copyright_text):
                 for artist in album.get('artists', []):
                     artist_id = artist.get('id')
@@ -241,18 +202,17 @@ def scan_one_page():
                     
                     if artist_id and artist_name and artist_id not in artists_already_found:
                         
-                        # ** NEW VALIDATION STEP **
-                        # Now that we found a potential artist, check their *newest* release
-                        if check_artist_most_recent_release(artist_id, token):
-                            artists_to_fetch_details_for[artist_id] = {
-                                "name": artist_name,
-                                "url": artist.get('external_urls', {}).get('spotify')
-                            }
+                        # ** The slow validation check was removed **
+                        # We add the artist immediately.
+                        artists_to_fetch_details_for[artist_id] = {
+                            "name": artist_name,
+                            "url": artist.get('external_urls', {}).get('spotify')
+                        }
                 
                 break # Found match, move to next album
 
     if not artists_to_fetch_details_for:
-        app.logger.info(f"Page {page_index}: Found P-lines, but no *new* artists who passed validation.")
+        app.logger.info(f"Page {page_index}: Found P-lines, but no *new* artists.")
         return jsonify({"artists": []})
 
     # --- Step 4: Get Artist Details & Filter by Followers ---
