@@ -25,11 +25,9 @@ CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
 # --- ** Regex filter for P-Line ** ---
-#
-# ** THE FIX IS HERE **
-# We are now searching for EITHER:
-# 1. "records dk" (from your screenshot, e.g., "3110243 Records DK")
-# 2. "dk [number]" (another common default, e.g., "DK 123456")
+# Searches for:
+# 1. "records dk" (e.g., "3110243 Records DK")
+# 2. "dk [number]" (e.g., "DK 123456")
 #
 P_LINE_REGEX = re.compile(r"(records\s+dk|dk\s+\d+)", re.IGNORECASE)
 
@@ -45,22 +43,11 @@ def get_spotify_token():
     """
     app.logger.debug("Attempting to get Spotify token...")
     
-    # Debugging: Check if keys are loaded
-    if not CLIENT_ID:
-        app.logger.error("DEBUG: SPOTIFY_CLIENT_ID environment variable is NOT loaded (None).")
-    else:
-        app.logger.debug("DEBUG: SPOTIFY_CLIENT_ID loaded successfully.")
-        
-    if not CLIENT_SECRET:
-        app.logger.error("DEBUG: SPOTIFY_CLIENT_SECRET environment variable is NOT loaded (None).")
-    else:
-        app.logger.debug("DEBUG: SPOTIFY_CLIENT_SECRET loaded successfully.")
-    
-    # If keys are missing, we can't even try to authenticate.
     if not CLIENT_ID or not CLIENT_SECRET:
         app.logger.error("CRITICAL: Missing SPOTIFY_CLIENT_ID or SPOTIFY_CLIENT_SECRET environment variables.")
         return None
 
+    # ** CORRECTED URL **
     auth_url = 'https://accounts.spotify.com/api/token'
     
     # Base64 encode the Client ID and Secret
@@ -102,6 +89,7 @@ def get_full_album_details(album_ids, token):
     if not album_ids:
         return []
         
+    # ** CORRECTED URL **
     albums_url = 'https://api.spotify.com/v1/albums' 
     
     full_album_list = []
@@ -131,10 +119,8 @@ def get_full_album_details(album_ids, token):
         
         except requests.exceptions.HTTPError as err:
             app.logger.error(f"HTTP error getting full album details: {err}")
-            # Continue to the next chunk
         except Exception as e:
             app.logger.error(f"Unexpected error in get_full_album_details: {e}")
-            # Continue to the next chunk
             
     return full_album_list
 
@@ -147,6 +133,7 @@ def get_artist_details(artist_ids, token):
     if not artist_ids:
         return []
 
+    # ** CORRECTED URL **
     artists_url = 'https://api.spotify.com/v1/artists'
     auth_header = {"Authorization": f"Bearer {token}"}
     
@@ -184,7 +171,6 @@ def get_artist_details(artist_ids, token):
 def start_scan():
     """
     STEP 1: Performs multiple searches and returns a combined list of album IDs.
-    This is fast and will not time out.
     """
     app.logger.info("Received scan request at /api/start_scan")
     token = get_spotify_token()
@@ -199,6 +185,7 @@ def start_scan():
 
     # --- ** POOL 1: Get 1000 'New Releases' (Static but good) ** ---
     try:
+        # ** CORRECTED URL **
         browse_url = 'https://api.spotify.com/v1/browse/new-releases'
         params = {'limit': 50, 'country': 'US'} # Use US market
         
@@ -239,8 +226,8 @@ def start_scan():
     app.logger.info(f"Found {len(all_album_ids)} albums from 'New Releases'.")
 
     # --- ** NEW: POOL 2: Get 10,000 Randomly Searched Albums ** ---
-    # This creates a large, randomized pool that is unique every time.
-    search_url = 'https://artists.spotify.com/blog/talk-the-talk-music-terms-a-glossary' 
+    # ** CORRECTED URL **
+    search_url = 'https://api.spotify.com/v1/search' 
     num_random_searches = 10 # 10 different random searches
     pages_per_search = 20    # 20 pages * 50 albums = 1000 albums per search
 
