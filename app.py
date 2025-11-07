@@ -1,8 +1,8 @@
 import os
 import base64
 import time
-import random
-import string
+import random  # <-- NEW
+import string  # <-- NEW
 import re
 from flask import Flask, jsonify, make_response, request
 from flask_cors import CORS
@@ -238,19 +238,15 @@ def start_scan():
     all_album_ids = set() # Use a set to avoid duplicates
     auth_header = {"Authorization": f"Bearer {token}"}
 
-    # --- ** NEW: We will ONLY search the 'New Releases' endpoint ** ---
-    # This is the largest, most diverse, and most random pool.
-    # We are *removing* the 'label:"Records DK"' search as it's too small and static.
-    
+    # --- ** POOL 1: Get 1000 'New Releases' (Static but good) ** ---
     try:
         browse_url = 'https://api.spotify.com/v1/browse/new-releases'
         params = {'limit': 50, 'country': 'US'} # Use US market
         
-        # ** NEW: Scan the maximum 20 pages (1000 albums) **
+        # Scan the maximum 20 pages (1000 albums)
         for page in range(20): # 20 pages * 50 albums/page = 1000 albums
             
-            app.logger.debug(f"Scanning 'New Releases' page {page + 1}...")
-            # We need to manually handle pagination for /browse/new-releases
+            app.logger.debug(f"Scanning 'New Releases' page {page + 1}/20...")
             params['offset'] = page * 50
             
             try:
@@ -280,6 +276,57 @@ def start_scan():
 
     except Exception as e:
         app.logger.error(f"ERROR during 'New Releases' search: {e}")
+
+    app.logger.info(f"Found {len(all_album_ids)} albums from 'New Releases'.")
+
+    # --- ** NEW: POOL 2: Get 10,000 Randomly Searched Albums ** ---
+    # This creates a large, randomized pool that is unique every time.
+    search_url = 'http://googleusercontent.com/spotify.com/5' # <-- NEW URL (assumed search)
+    num_random_searches = 10 # 10 different random searches
+    pages_per_search = 20    # 20 pages * 50 albums = 1000 albums per search
+
+    app.logger.info(f"Starting {num_random_searches} random searches...")
+
+    for i in range(num_random_searches):
+        # Create a random search query (e.g., "a*", "b*", etc.)
+        random_char = random.choice(string.ascii_lowercase)
+        query = f"{random_char}*"
+        
+        app.logger.debug(f"Running random search {i+1}/{num_random_searches} (query: {query})")
+        
+        for page in range(pages_per_search):
+            params = {
+                'q': query,
+                'type': 'album',
+                'limit': 50,
+                'offset': page * 50,
+                'market': 'US'
+            }
+            try:
+                response = requests.get(search_url, headers=auth_header, params=params)
+                response.raise_for_status()
+                data = response.json()
+            
+            except requests.exceptions.HTTPError as err:
+                app.logger.error(f"Error on page {page+1} of random search '{query}': {err}")
+                if response.status_code == 429: # Handle rate limiting
+                    retry_after = int(response.headers.get('Retry-After', 10))
+                    app.logger.warning(f"Rate limited. Waiting {retry_after}s...")
+                    time.sleep(retry_after)
+                    continue # Retry this page
+                else:
+                    continue # Skip this page on other errors
+            
+            albums_page = data.get('albums', {}).get('items', [])
+            if not albums_page:
+                app.logger.info(f"No more albums found for query '{query}'. Moving to next search.")
+                break # Stop if we run out of pages
+
+            for album in albums_page:
+                if album and album.get('id'):
+                    all_album_ids.add(album['id'])
+            
+            time.sleep(0.05) # Be nice to API
 
     app.logger.info(f"Initial search complete. Found {len(all_album_ids)} total unique album IDs to process.")
     return jsonify({"album_ids": list(all_album_ids)})
