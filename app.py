@@ -24,12 +24,7 @@ logging.basicConfig(level=logging.DEBUG)
 CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
-# --- ** Stricter Regex filter for P-Line ** ---
-#
-# ** THE FIX IS HERE **
-# Old: re.compile(r"\d+\s+records\s+dk", re.IGNORECASE)
-# New: Just looks for the phrase "records dk"
-#
+# --- ** Regex filter for P-Line ** ---
 P_LINE_REGEX = re.compile(r"records\s+dk", re.IGNORECASE)
 
 # --- ** Follower Threshold ** ---
@@ -177,50 +172,9 @@ def get_artist_details(artist_ids, token):
 
     return artist_details_list
 
-# --- ** NEW: Helper Function to Check Artist's Most Recent Release ** ---
-def check_artist_most_recent_release(artist_id, token):
-    """
-    Gets the artist's most recent album/single and checks its P-line.
-    Returns True if it matches, False otherwise.
-    """
-    try:
-        # 1. Get the artist's most recent album or single
-        url = f"https://api.spotify.com/v1/artists/{artist_id}/albums"
-        params = {
-            'include_groups': 'album,single',
-            'limit': 1,
-            'country': 'US' # Use US market as a standard
-        }
-        headers = {"Authorization": f"Bearer {token}"}
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        
-        data = response.json()
-        if not data.get('items'):
-            app.logger.warning(f"Artist {artist_id} has no recent items to check.")
-            return False # Artist has no albums
-            
-        most_recent_album_id = data['items'][0]['id']
-
-        # 2. Get the *full details* of that one album
-        full_album_details = get_full_album_details([most_recent_album_id], token)
-        if not full_album_details:
-            app.logger.warning(f"Could not get details for recent album {most_recent_album_id}")
-            return False
-
-        # 3. Check its P-line (using the CORRECTED regex)
-        for copyright in full_album_details[0].get('copyrights', []):
-            copyright_text = copyright.get('text', '')
-            if copyright.get('type') == 'P' and P_LINE_REGEX.search(copyright_text):
-                app.logger.info(f"CONFIRMED: Artist {artist_id} most recent release has DK P-line.")
-                return True # Found a match
-
-        app.logger.info(f"REJECTED: Artist {artist_id} most recent release does NOT have DK P-line.")
-        return False # No P-line match on most recent release
-        
-    except Exception as e:
-        app.logger.error(f"Error checking recent release for artist {artist_id}: {e}")
-        return False
+# --- ** DELETED FUNCTION ** ---
+# The check_artist_most_recent_release function was here.
+# It was too strict and has been removed.
 
 
 # --- ** UPDATED API Route: /api/start_scan ** ---
@@ -284,7 +238,7 @@ def start_scan():
 
     # --- ** NEW: POOL 2: Get 10,000 Randomly Searched Albums ** ---
     # This creates a large, randomized pool that is unique every time.
-    search_url = 'http://googleusercontent.com/spotify.com/5' # <-- NEW URL (assumed search)
+    search_url = 'http://googleusercontent.com/spotify.com/5' 
     num_random_searches = 10 # 10 different random searches
     pages_per_search = 20    # 20 pages * 50 albums = 1000 albums per search
 
@@ -345,7 +299,6 @@ def get_details():
     app.logger.info("Received request at /api/get_details")
     data = request.get_json()
     album_ids = data.get('album_ids')
-    # ** NEW: Get the list of artists we've already found **
     artists_already_found = data.get('artists_already_found', [])
 
     if not album_ids:
@@ -366,25 +319,26 @@ def get_details():
     for album in full_albums:
         if not album: continue
         for copyright in album.get('copyrights', []):
-            copyright_text = copyright.get('text', '') # No .lower() needed for regex
+            copyright_text = copyright.get('text', '')
             
-            # --- ** FINAL, CORRECTED REGEX FILTER ** ---
+            # --- ** SIMPLIFIED REGEX FILTER ** ---
             if copyright.get('type') == 'P' and P_LINE_REGEX.search(copyright_text):
                 # Found an album with the P-line
                 for artist in album.get('artists', []):
                     artist_id = artist.get('id')
                     artist_name = artist.get('name')
                     
-                    # ** NEW: Duplicate check **
                     if artist_id and artist_name and artist_id not in artists_already_found:
                         
-                        # ** NEW: Check artist's most recent release **
-                        if check_artist_most_recent_release(artist_id, token):
-                            # This function also uses the CORRECTED regex
-                            artists_to_fetch_details_for[artist_id] = {
-                                "name": artist_name,
-                                "url": artist.get('external_urls', {}).get('spotify')
-                            }
+                        # --- ** LOGIC FIX ** ---
+                        # The "double-check" (check_artist_most_recent_release)
+                        # was removed. We now add the artist immediately.
+                        
+                        artists_to_fetch_details_for[artist_id] = {
+                            "name": artist_name,
+                            "url": artist.get('external_urls', {}).get('spotify')
+                        }
+                
                 break # Found a match, move to the next album
     
     if not artists_to_fetch_details_for:
@@ -411,7 +365,7 @@ def get_details():
                     "url": base_info['url'],
                     "followers": artist_followers,
                     "popularity": artist_data.get('popularity', 0),
-                    "id": artist_id # ** NEW: Send ID to frontend for duplicate checking **
+                    "id": artist_id 
                 })
             else:
                  app.logger.info(f"Filtering out artist: {base_info['name']} (Followers: {artist_followers})")
