@@ -4,6 +4,7 @@ import time
 import random
 import string
 import re
+import datetime # <-- NEW IMPORT
 from flask import Flask, jsonify, make_response, request
 from flask_cors import CORS
 import requests
@@ -34,8 +35,8 @@ MAX_FOLLOWERS = 100000
 # 20 pages of "New Releases" + 180 pages of "Random Searches"
 # The frontend will loop this many times.
 PAGES_NEW_RELEASES = 20
-PAGES_RANDOM_SEARCH = 180 # 18 searches * 10 pages each
-PAGES_PER_RANDOM_SEARCH = 10 # We'll only scan the first 10 pages of a random query
+PAGES_RANDOM_SEARCH = 180 
+PAGES_PER_RANDOM_SEARCH = 10 
 
 # --- Helper Function: Get Access Token ---
 def get_spotify_token():
@@ -137,6 +138,9 @@ def scan_one_page():
     auth_header = {"Authorization": f"Bearer {token}"}
     album_ids_from_page = set()
     
+    # ** NEW: Get current year for filtering **
+    current_year = datetime.datetime.now().year
+    
     try:
         # --- Step 1: Get 50 Album Summaries ---
         if page_index < PAGES_NEW_RELEASES:
@@ -156,13 +160,17 @@ def scan_one_page():
             # This logic finds one of 10 pages from a random letter search
             page_offset = (page_index - PAGES_NEW_RELEASES) % PAGES_PER_RANDOM_SEARCH
             
+            # ** TIGHTENED PARAMETER **
+            query = f"{random_char}* year:{current_year}"
+            
             params = {
-                'q': f"{random_char}*",
+                'q': query,
                 'type': 'album',
                 'limit': 50,
                 'offset': page_offset * 50, # 0, 50, 100...
                 'market': 'US'
             }
+            app.logger.debug(f"Running random search with query: {query}, offset: {page_offset * 50}")
             response = requests.get(search_url, headers=auth_header, params=params)
             response.raise_for_status()
             data = response.json()
@@ -220,7 +228,7 @@ def scan_one_page():
     for artist_data in detailed_artists:
         if not artist_data: continue
         artist_id = artist_data.get('id')
-        base_info = artists_to_fetch_details_for.get(artist_id)
+        base_info = artists_to_fetch_details_for.get(artist_D)
         if base_info:
             artist_followers = artist_data.get('followers', {}).get('total', 0)
             if artist_followers < MAX_FOLLOWERS:
