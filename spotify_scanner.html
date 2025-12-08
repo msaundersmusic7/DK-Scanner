@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Label Scanner | Too Lost Style</title>
+    <title>Label Scanner | Turbo Mode</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
     <style>
@@ -14,7 +14,7 @@
             border-radius: 50%;
             width: 20px;
             height: 20px;
-            animation: spin 0.8s linear infinite;
+            animation: spin 0.6s linear infinite;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
         ::-webkit-scrollbar { width: 6px; }
@@ -37,29 +37,28 @@
             <div class="flex items-center space-x-3 mb-2">
                 <div class="bg-red-600 p-2 rounded-lg shadow-[0_0_15px_rgba(239,68,68,0.5)]">
                     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                        <circle cx="11" cy="11" r="8"></circle>
-                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path>
                     </svg>
                 </div>
-                <h1 class="text-4xl font-extrabold tracking-tight">LABEL SCANNER</h1>
+                <h1 class="text-4xl font-extrabold tracking-tight">LABEL SCANNER <span class="text-red-600 text-lg align-top">TURBO</span></h1>
             </div>
-            <p class="text-gray-500 text-sm font-medium tracking-wide uppercase">Powered by Spotify API • Records DK Hunter</p>
+            <p class="text-gray-500 text-sm font-medium tracking-wide uppercase">Multi-Threaded • Anti-Bot • Broadnet Search</p>
         </div>
 
         <div class="flex flex-col items-center mb-10">
             <button id="start-scan" class="group relative bg-white text-black font-extrabold py-4 px-10 rounded-xl shadow-lg hover:shadow-[0_0_25px_rgba(255,255,255,0.3)] transition-all duration-300 transform hover:-translate-y-1 flex items-center overflow-hidden">
                 <div class="absolute inset-0 bg-gray-200 opacity-0 group-hover:opacity-20 transition-opacity"></div>
-                <span id="button-text" class="tracking-wide text-lg">START SCAN</span>
+                <span id="button-text" class="tracking-wide text-lg">INITIATE SCAN</span>
                 <div id="loading-spinner" class="spinner ml-3 hidden"></div>
             </button>
-            <div id="status" class="mt-4 text-gray-500 font-mono text-xs">System Ready.</div>
+            <div id="status" class="mt-4 text-gray-500 font-mono text-xs">System Idle. Ready for input.</div>
         </div>
 
         <div id="results-container" class="glass-panel rounded-2xl p-1 hidden opacity-0 transition-opacity duration-500">
             <div class="flex justify-between items-center p-5 border-b border-white/5">
                 <div class="flex items-center space-x-2">
                     <div class="h-2 w-2 rounded-full bg-red-500 animate-pulse"></div>
-                    <h2 class="text-sm font-bold uppercase tracking-wider text-gray-300">Live Results</h2>
+                    <h2 class="text-sm font-bold uppercase tracking-wider text-gray-300">Live Feed</h2>
                 </div>
                 
                 <div class="flex space-x-2">
@@ -73,14 +72,14 @@
                 <table class="w-full text-left">
                     <thead class="bg-black/40 sticky top-0 backdrop-blur-md z-10">
                         <tr>
-                            <th id="sort-name" class="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-widest hover:text-white transition-colors">Artist Name</th>
-                            <th id="sort-followers-col" class="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-widest hover:text-white transition-colors">Followers</th>
-                            <th id="sort-popularity-col" class="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-widest hover:text-white transition-colors">Score</th>
-                            <th class="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-widest text-right">Actions</th>
+                            <th id="sort-name" class="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-widest hover:text-white transition-colors">Artist Identity</th>
+                            <th id="sort-followers-col" class="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-widest hover:text-white transition-colors">Audience</th>
+                            <th id="sort-popularity-col" class="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-widest hover:text-white transition-colors">Velocity</th>
+                            <th class="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-widest text-right">Intel</th>
                         </tr>
                     </thead>
                     <tbody id="results-table-body" class="divide-y divide-white/5">
-                        <tr><td colspan="4" class="px-6 py-12 text-center text-gray-600 font-mono text-sm">Initialize scan to retrieve data...</td></tr>
+                        <tr><td colspan="4" class="px-6 py-12 text-center text-gray-600 font-mono text-sm">Awaiting data stream...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -107,7 +106,9 @@
         let artistsAlreadyFound = new Set(); 
         let isScanning = false;
         let currentSort = { key: 'name', asc: true };
-        const TOTAL_PAGES_TO_SCAN = 200; 
+        
+        // --- OPTIMIZATION: Reduced Page Count (compensated by faster processing) ---
+        const TOTAL_PAGES_TO_SCAN = 100; 
 
         startButton.addEventListener('click', handleStartScan);
         downloadButton.addEventListener('click', downloadResults);
@@ -124,13 +125,13 @@
             allArtists = [];
             artistsAlreadyFound.clear(); 
             
-            resultsTableBody.innerHTML = `<tr><td colspan="4" class="px-6 py-12 text-center text-gray-500 font-mono animate-pulse">Scanning the ecosystem...</td></tr>`;
+            resultsTableBody.innerHTML = `<tr><td colspan="4" class="px-6 py-12 text-center text-gray-500 font-mono animate-pulse">Establishing connection to Spotify Matrix...</td></tr>`;
             resultsContainer.classList.remove('hidden');
             setTimeout(() => resultsContainer.classList.remove('opacity-0'), 100);
             
             downloadButton.classList.add('hidden');
             loadingSpinner.classList.remove('hidden');
-            buttonText.textContent = "SCANNING";
+            buttonText.textContent = "SCANNING...";
             startButton.disabled = true;
             startButton.classList.add('opacity-50', 'cursor-not-allowed');
 
@@ -140,7 +141,7 @@
                 resultsTableBody.innerHTML = ''; 
                 for (let i = 0; i < TOTAL_PAGES_TO_SCAN; i++) {
                     const percent = Math.round(((i + 1) / TOTAL_PAGES_TO_SCAN) * 100);
-                    updateStatus(`[SYSTEM] Scanning... ${percent}% complete | Found: ${totalArtistsFound}`);
+                    updateStatus(`[PROCESSING] Sector ${i + 1}/${TOTAL_PAGES_TO_SCAN} | Identified: ${totalArtistsFound}`);
                     
                     const response = await fetch('/api/scan_one_page', {
                         method: 'POST',
@@ -165,8 +166,8 @@
                         downloadButton.classList.remove('hidden');
                     }
                 }
-                updateStatus(`[COMPLETE] Scan finished. ${totalArtistsFound} candidates located.`);
-                if (totalArtistsFound === 0) resultsTableBody.innerHTML = `<tr><td colspan="4" class="px-6 py-12 text-center text-gray-500 font-mono">No matching artists found.</td></tr>`;
+                updateStatus(`[COMPLETE] Scan Finalized. ${totalArtistsFound} high-value targets secured.`);
+                if (totalArtistsFound === 0) resultsTableBody.innerHTML = `<tr><td colspan="4" class="px-6 py-12 text-center text-gray-500 font-mono">No targets matching filter criteria.</td></tr>`;
 
             } catch (error) {
                 showError(error.message);
@@ -178,7 +179,7 @@
         function stopLoading() {
             isScanning = false;
             loadingSpinner.classList.add('hidden');
-            buttonText.textContent = "START NEW SCAN";
+            buttonText.textContent = "INITIATE SCAN";
             startButton.disabled = false;
             startButton.classList.remove('opacity-50', 'cursor-not-allowed');
         }
@@ -200,7 +201,7 @@
         function renderTable() {
             resultsTableBody.innerHTML = '';
             if (allArtists.length === 0) {
-                 resultsTableBody.innerHTML = `<tr><td colspan="4" class="px-6 py-12 text-center text-gray-500 font-mono animate-pulse">Acquiring targets...</td></tr>`;
+                 resultsTableBody.innerHTML = `<tr><td colspan="4" class="px-6 py-12 text-center text-gray-500 font-mono animate-pulse">Acquiring data...</td></tr>`;
                  return;
             }
             allArtists.forEach(artist => {
@@ -208,8 +209,7 @@
                 row.className = "group hover:bg-white/5 transition-colors border-b border-white/5 last:border-0";
                 const followersFormatted = artist.followers.toLocaleString();
                 
-                // --- UPGRADED SEARCH LOGIC ---
-                // Query: "Artist Name" (email OR contact OR facebook.com OR instagram.com)
+                // Broadnet Search Query
                 const query = `"${artist.name}" (email OR contact OR site:facebook.com OR site:instagram.com OR site:twitter.com)`;
                 const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
                 
