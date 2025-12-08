@@ -2,6 +2,7 @@ import os
 import base64
 import time
 import random
+import string
 import re
 from flask import Flask, jsonify, request, make_response
 from flask_cors import CORS
@@ -18,12 +19,13 @@ CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
 # --- SETTINGS ---
-MAX_FOLLOWERS = 100000      # Higher limit to catch buzzing indies
-REQUIRE_IMAGE = True        # Filter out low-effort spam
-BLOCKED_KEYWORDS = ["white noise", "sleep", "lullaby", "rain sounds", "meditation", "frequency", "chakra", "binaural"]
+MAX_FOLLOWERS = 150000      # Increased to ensure we don't filter out rising stars
+REQUIRE_IMAGE = True        
+BLOCKED_KEYWORDS = ["white noise", "sleep", "lullaby", "rain sounds", "meditation", "frequency"]
 
-# Regex for "Records DK" or "DistroKid"
-P_LINE_REGEX = re.compile(r"(records\s+dk|dk\s+\d+|distrokid)", re.IGNORECASE)
+# Regex for "Records DK", "DistroKid", and variations
+# Matches: "Records DK", "RecordsDK", "DK 1234", "DistroKid"
+P_LINE_REGEX = re.compile(r"(records\s*dk|dk\s*\d+|distrokid)", re.IGNORECASE)
 
 # --- Token Management ---
 token_info = {'access_token': None, 'expires_at': 0}
@@ -93,11 +95,13 @@ def check_copyright_match(album, artist_name):
                 return True
             
             # 2. Name Match (e.g. "© 2025 Band Name" matches "Band Name")
+            # We enforce a min length of 3 to avoid matching "Ra" or "X"
             if len(artist_clean) >= 3 and artist_clean in text_clean:
                 return True
     return False
 
 def is_real_artist_name(name):
+    if not name: return False
     name_lower = name.lower()
     for word in BLOCKED_KEYWORDS:
         if word in name_lower: return False
@@ -110,24 +114,47 @@ def scan_one_page():
     
     data = request.get_json()
     artists_already_found = set(data.get('artists_already_found', []))
+    page_index = data.get('page_index', 0)
+    
     final_results = []
     
-    # We try up to 3 different offsets to find results
+    # === FAIL-SAFE LOOP ===
+    # We will try up to 3 different strategies/pages per request to ensure we find results.
+    # If Strategy A (tag:new) yields 0 results, we immediately try Strategy B.
+    
     for attempt in range(3):
-        if len(final_results) >= 5: break
+        if len(final_results) >= 5: break # If we have enough results, stop.
+
+        # --- STRATEGY SELECTION ---
         
-        # KEY CHANGE: Using 'tag:new' as the primary source
-        # Offset max is usually 1000 for this tag. We pick a random spot.
-        offset = random.randint(0, 900)
-        
+        # Strategy A: Use 'tag:new' (The Goldmine)
+        # We cycle the offset 0-950 based on page_index to respect the 1000 limit.
+        if attempt == 0:
+            query = 'tag:new'
+            # Loop offset 0 -> 950. If page_index is 20, offset is 1000 (limit). 
+            # We wrap around using modulo: (20 * 50) % 1000 = 0
+            offset = (page_index * 50) % 1000 
+            market = 'US'
+            
+        # Strategy B: Random Character + Current Year (The Fallback)
+        # If Strategy A failed (or we looped), we pick a random letter to find hidden gems.
+        else:
+            char = random.choice(string.ascii_lowercase)
+            query = f"{char}* year:2024-2025"
+            offset = random.randint(0, 900)
+            market = 'US'
+
+        app.logger.info(f"Attempt {attempt}: Query='{query}' Offset={offset}")
+
+        # 1. Perform Search
         search_data = make_request(
             'https://api.spotify.com/v1/search', token,
             {
-                'q': 'tag:new', 
+                'q': query, 
                 'type': 'album', 
                 'limit': 50, 
                 'offset': offset, 
-                'market': 'US'
+                'market': market
             }
         )
         
@@ -136,11 +163,11 @@ def scan_one_page():
         raw_albums = search_data.get('albums', {}).get('items', [])
         if not raw_albums: continue
         
-        # 1. Get Album IDs
+        # 2. Get Album Details (to check Copyrights)
         album_ids = [alb['id'] for alb in raw_albums if alb and alb.get('id')]
         candidates = {} 
         
-        # 2. Batch Fetch Full Details (for Copyrights)
+        # Chunk into groups of 20 (Spotify API limit for IDs)
         for i in range(0, len(album_ids), 20):
             chunk = album_ids[i:i+20]
             details = make_request('https://api.spotify.com/v1/albums', token, {'ids': ','.join(chunk)})
@@ -154,7 +181,7 @@ def scan_one_page():
                     name = artist.get('name')
                     
                     if aid and name and aid not in artists_already_found and is_real_artist_name(name):
-                        # CORE CHECK: Matches DK or Self-Release?
+                        # CRITICAL CHECK: Does copyright match DK or Artist Name?
                         if check_copyright_match(album, name):
                             candidates[aid] = {
                                 'name': name,
@@ -163,7 +190,7 @@ def scan_one_page():
 
         if not candidates: continue
 
-        # 3. Batch Fetch Artist Profiles (for Image/Followers)
+        # 3. Get Artist Profiles (to check Followers/Image)
         artist_ids = list(candidates.keys())
         for i in range(0, len(artist_ids), 50):
             chunk = artist_ids[i:i+50]
@@ -187,6 +214,7 @@ def scan_one_page():
                     })
                     artists_already_found.add(aid)
 
+    app.logger.info(f"Found {len(final_results)} artists in {page_index}.")
     return jsonify({"artists": final_results})
 
 @app.route('/')
