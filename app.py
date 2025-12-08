@@ -5,7 +5,7 @@ import random
 import string
 import re
 import datetime 
-from flask import Flask, jsonify, make_response, request
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
 import logging
@@ -14,7 +14,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # --- Flask App Setup ---
 app = Flask(__name__)
 CORS(app)
-logging.basicConfig(level=logging.INFO)
+# Switch logging to DEBUG so you can see exactly why artists are rejected in Render logs
+logging.basicConfig(level=logging.DEBUG) 
 
 # --- Configuration ---
 CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
@@ -22,15 +23,13 @@ CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
 # --- SETTINGS ---
 MAX_FOLLOWERS = 50000      
-MIN_POPULARITY = 0         # Set to 0 to catch brand new artists
-REQUIRE_IMAGE = True       # Still require an image (shows basic effort)
-REQUIRE_GENRE = False      # DISABLED: Many new indie artists don't have genres tagged yet
-MIN_RELEASES = 1           # 1 release is enough
-DAYS_WINDOW = 365          # EXPANDED: 1 year window. (Maximizes results)
+MIN_POPULARITY = 0         # Catch everyone, even brand new artists
+REQUIRE_IMAGE = True       
+DAYS_WINDOW = 365          # 1 Year Window (Safe for Indies)
+MIN_RELEASES = 1
 
-# --- MINIMALIST BOT FILTER ---
-# Only blocking the absolute worst offenders.
-BLOCKED_KEYWORDS = ["white noise", "sleep", "meditation", "lullaby", "frequency"]
+# --- BOT FILTER (Minimal) ---
+BLOCKED_KEYWORDS = ["white noise", "sleep", "meditation", "lullaby", "frequency", "rain sounds"]
 
 # Regex: Matches "Records DK", "DK <number>", "DistroKid"
 P_LINE_REGEX = re.compile(r"(records\s+dk|dk\s+\d+|distrokid)", re.IGNORECASE)
@@ -79,23 +78,24 @@ def make_request_with_token(url, token, params=None):
     except Exception:
         return None
 
-def clean_artist_name(name):
-    """Removes 'The ' and standardizes for comparison."""
+def clean_name_for_match(name):
+    """Simplifies string for copyright comparison."""
     if not name: return ""
+    # Remove "The", punctuation, and lower case
     clean = name.lower()
-    if clean.startswith("the "):
-        clean = clean[4:]
-    return clean.strip()
+    if clean.startswith("the "): clean = clean[4:]
+    return re.sub(r'[^a-z0-9]', '', clean)
 
 def check_copyright_match(album, artist_name=None):
     """
     Returns True if:
     1. 'Records DK' / 'DistroKid' is in the text.
-    2. The Artist's name (or close variation) is in the text.
+    2. The Artist's name is inside the copyright text.
     """
     for copyright in album.get('copyrights', []):
         if copyright.get('type') in ['P', 'C']:
             text = copyright.get('text', '').lower()
+            text_clean = re.sub(r'[^a-z0-9]', '', text) # Clean copyright text
             
             # 1. Regex Match (Records DK)
             if P_LINE_REGEX.search(text): 
@@ -103,9 +103,9 @@ def check_copyright_match(album, artist_name=None):
             
             # 2. Name Match
             if artist_name:
-                clean_name = clean_artist_name(artist_name)
-                # Check if "Band Name" is in "© 2025 Band Name LLC"
-                if clean_name in text:
+                name_clean = clean_name_for_match(artist_name)
+                # Check if "bandname" is inside "2025bandnamellc"
+                if len(name_clean) > 3 and name_clean in text_clean:
                     return True
     return False
 
@@ -115,56 +115,123 @@ def is_real_artist_name(name):
         if word in name_lower: return False
     return True
 
-def is_quality_candidate(artist_obj):
-    # Only filtering empty profiles and bots.
-    if REQUIRE_IMAGE and not artist_obj.get('images'): return False
-    # REMOVED: Genre check (too strict for new artists)
-    if artist_obj.get('popularity', 0) < MIN_POPULARITY: return False
-    if not is_real_artist_name(artist_obj.get('name', '')): return False
-    return True
+def process_search_query(token, artists_already_found):
+    """
+    Runs ONE search query and returns potential candidates.
+    We pulled this out to allow looping/retrying.
+    """
+    current_year = datetime.datetime.now().year
+    
+    # STRATEGY: 2 Random Letters (e.g., "st*", "ba*")
+    # This creates 676 unique buckets. Much safer than offsets.
+    char1 = random.choice(string.ascii_lowercase)
+    char2 = random.choice(string.ascii_lowercase)
+    query = f"{char1}{char2}* year:{current_year}"
+    
+    app.logger.info(f"Running Query: {query}")
 
-def check_single_artist_activity(package):
+    search_data = make_request_with_token(
+        'https://api.spotify.com/v1/search', token,
+        {'q': query, 'type': 'album', 'limit': 50, 'market': 'US'}
+    )
+    
+    if not search_data: return []
+    
+    raw_albums = search_data.get('albums', {}).get('items', [])
+    if not raw_albums: 
+        app.logger.info("Query returned 0 albums.")
+        return []
+    
+    # Batch Get Album Details (To check copyrights)
+    album_ids = [alb['id'] for alb in raw_albums if alb and alb.get('id')]
+    candidate_map = {} 
+    
+    for i in range(0, len(album_ids), 20):
+        chunk = album_ids[i:i+20]
+        details = make_request_with_token('https://api.spotify.com/v1/albums', token, {'ids': ','.join(chunk)})
+        if not details: continue
+        
+        for album in details.get('albums', []):
+            if not album: continue
+            
+            # 1. Global DK Check
+            is_dk = check_copyright_match(album, None)
+            
+            for artist in album.get('artists', []):
+                aid = artist.get('id')
+                name = artist.get('name')
+                
+                if aid and name and aid not in artists_already_found and is_real_artist_name(name):
+                    # 2. Name Match Check
+                    is_self_release = check_copyright_match(album, name)
+                    
+                    if is_dk or is_self_release:
+                        candidate_map[aid] = {
+                            'name': name,
+                            'url': artist.get('external_urls', {}).get('spotify')
+                        }
+
+    # Batch Get Artist Details (To check followers/image)
+    artist_ids = list(candidate_map.keys())
+    verified = []
+    
+    for i in range(0, len(artist_ids), 50):
+        chunk = artist_ids[i:i+50]
+        adata = make_request_with_token('https://api.spotify.com/v1/artists', token, {'ids': ','.join(chunk)})
+        if not adata: continue
+        
+        for a_obj in adata.get('artists', []):
+            if not a_obj: continue
+            
+            if REQUIRE_IMAGE and not a_obj.get('images'): continue
+            if a_obj.get('followers', {}).get('total', 0) > MAX_FOLLOWERS: continue
+            
+            aid = a_obj.get('id')
+            if aid in candidate_map:
+                verified.append({
+                    "name": candidate_map[aid]['name'],
+                    "url": candidate_map[aid]['url'],
+                    "followers": a_obj.get('followers', {}).get('total', 0),
+                    "popularity": a_obj.get('popularity', 0),
+                    "id": aid
+                })
+    
+    return verified
+
+def verify_latest_release(artist, token):
     """
-    Worker function. Verifies the LATEST release.
+    Final Check: Is their *latest* release actually recent?
     """
-    aid, name, url, pop, followers, token = package
+    aid = artist['id']
+    name = artist['name']
     
     api_url = f"https://api.spotify.com/v1/artists/{aid}/albums"
-    params = {'include_groups': 'album,single', 'limit': 10, 'market': 'US'}
+    params = {'include_groups': 'album,single', 'limit': 5, 'market': 'US'}
     data = make_request_with_token(api_url, token, params)
     
     if not data or not data.get('items'): return None
     items = data.get('items', [])
     
-    # Sort by date descending
+    # Sort by date
     items.sort(key=lambda x: x.get('release_date', '0000'), reverse=True)
-    latest_release = items[0]
+    latest = items[0]
     
     # Recency Check
-    release_date_str = latest_release.get('release_date', '2000-01-01')
+    r_date_str = latest.get('release_date', '2000-01-01')
     try:
-        if len(release_date_str) == 4: r_date = datetime.datetime.strptime(release_date_str, "%Y")
-        elif len(release_date_str) == 7: r_date = datetime.datetime.strptime(release_date_str, "%Y-%m")
-        else: r_date = datetime.datetime.strptime(release_date_str, "%Y-%m-%d")
+        if len(r_date_str) == 4: r_date = datetime.datetime.strptime(r_date_str, "%Y")
+        else: r_date = datetime.datetime.strptime(r_date_str, "%Y-%m-%d" if len(r_date_str) == 10 else "%Y-%m")
         
         if (datetime.datetime.now() - r_date).days > DAYS_WINDOW:
             return None # Too old
-    except ValueError:
-        return None
+    except:
+        return None # Date error, skip
 
-    # Copyright Check on LATEST RELEASE
-    album_details_url = f"https://api.spotify.com/v1/albums/{latest_release['id']}"
-    full_album = make_request_with_token(album_details_url, token)
-    
-    if full_album:
-        if check_copyright_match(full_album, name):
-            return {
-                "name": name,
-                "url": url,
-                "followers": followers,
-                "popularity": pop,
-                "id": aid
-            }
+    # Re-verify Copyright on Latest
+    full_album = make_request_with_token(f"https://api.spotify.com/v1/albums/{latest['id']}", token)
+    if full_album and check_copyright_match(full_album, name):
+        return artist # Success!
+        
     return None
 
 @app.route('/api/scan_one_page', methods=['POST'])
@@ -175,82 +242,28 @@ def scan_one_page():
     data = request.get_json()
     artists_already_found = set(data.get('artists_already_found', []))
     
-    # --- DEEP SEARCH STRATEGY ---
-    current_year = datetime.datetime.now().year
-    
-    # Use just ONE char to get a huge bucket, but use OFFSET to dig deep
-    char = random.choice(string.ascii_lowercase)
-    # Random offset between 0 and 900 (Spotify limit is usually 1000-2000)
-    # This jumps past the famous artists to the indie section
-    rand_offset = random.randint(0, 900)
-    
-    query = f"{char}* year:{current_year}"
-    
-    # Fetch 50 albums from deep in the list
-    search_data = make_request_with_token(
-        'https://api.spotify.com/v1/search', token,
-        {'q': query, 'type': 'album', 'limit': 50, 'offset': rand_offset, 'market': 'US'}
-    )
-    
-    if not search_data: return jsonify({"artists": []})
-    
-    raw_albums = search_data.get('albums', {}).get('items', [])
-    if not raw_albums: return jsonify({"artists": []})
-    
-    # Extract Artist IDs to process
-    # We blindly grab ALL artist IDs from these albums to check them
-    candidate_map = {} 
-    
-    for album in raw_albums:
-        if not album: continue
-        for artist in album.get('artists', []):
-            aid = artist.get('id')
-            name = artist.get('name')
-            if aid and name and aid not in artists_already_found:
-                candidate_map[aid] = {
-                    'name': name,
-                    'url': artist.get('external_urls', {}).get('spotify')
-                }
-
-    if not candidate_map: return jsonify({"artists": []})
-
-    # Batch Process Artist Details
-    artist_ids = list(candidate_map.keys())
-    verified_candidates = [] 
-    
-    # We chunk in 50s
-    for i in range(0, len(artist_ids), 50):
-        chunk = artist_ids[i:i+50]
-        adata = make_request_with_token('https://api.spotify.com/v1/artists', token, {'ids': ','.join(chunk)})
-        if not adata: continue
-        
-        for a_obj in adata.get('artists', []):
-            if not a_obj: continue
-            
-            # Apply Light Filters
-            if is_quality_candidate(a_obj):
-                aid = a_obj.get('id')
-                if aid in candidate_map:
-                     verified_candidates.append((
-                        aid,
-                        candidate_map[aid]['name'],
-                        candidate_map[aid]['url'],
-                        a_obj.get('popularity', 0),
-                        a_obj.get('followers', {}).get('total', 0),
-                        token
-                    ))
-
-    # Threaded Verification
     final_results = []
-    if verified_candidates:
-        # Increased workers to 15 to chew through the queue faster
-        with ThreadPoolExecutor(max_workers=15) as executor:
-            future_to_artist = {executor.submit(check_single_artist_activity, pkg): pkg for pkg in verified_candidates}
+    attempts = 0
+    
+    # AUTO-RETRY LOOP
+    # If a search returns 0 results, we try again immediately (up to 5 times)
+    # This guarantees the frontend gets data.
+    while len(final_results) < 3 and attempts < 5:
+        attempts += 1
+        candidates = process_search_query(token, artists_already_found)
+        
+        if not candidates: continue
+        
+        # Run detailed verification in threads
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_artist = {executor.submit(verify_latest_release, c, token): c for c in candidates}
             for future in as_completed(future_to_artist):
-                result = future.result()
-                if result:
-                    final_results.append(result)
+                res = future.result()
+                if res:
+                    final_results.append(res)
+                    artists_already_found.add(res['id']) # Prevent duplicates in same batch
 
+    app.logger.info(f"Returning {len(final_results)} artists after {attempts} attempts.")
     return jsonify({"artists": final_results})
 
 @app.route('/')
