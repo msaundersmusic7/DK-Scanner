@@ -26,7 +26,7 @@
     </style>
 </head>
 <body class="bg-black text-gray-100 font-sans p-6 min-h-screen">
-    <div class="max-w-5xl mx-auto">
+    <div class="max-w-6xl mx-auto">
         
         <div class="flex items-center justify-center mb-6">
             <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#1ed760" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -65,7 +65,7 @@
                             <th id="sort-name" class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider sort-asc">Artist</th>
                             <th id="sort-followers-col" class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Followers</th>
                             <th id="sort-popularity-col" class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Pop (0-100)</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Action</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Contact Search</th>
                         </tr>
                     </thead>
                     <tbody id="results-table-body" class="bg-gray-900 divide-y divide-gray-800">
@@ -195,8 +195,13 @@
                 const row = document.createElement('tr');
                 row.className = "hover:bg-gray-800";
                 const followersFormatted = artist.followers.toLocaleString();
-                // SEARCH URL for "Artist Name + Contact + Instagram"
-                const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(artist.name + " contact email instagram")}`;
+                
+                // --- REFINED SEARCH PARAMETERS ---
+                // Query: "Artist Name" music (email OR contact OR booking OR mgmt)
+                // Using quotes around name ensures exact match.
+                // Using OR operators captures multiple types of contact info pages.
+                const query = `"${artist.name}" music (email OR contact OR booking OR mgmt)`;
+                const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
                 
                 row.innerHTML = `
                     <td class="px-6 py-4 whitespace-nowrap">
@@ -205,8 +210,8 @@
                     <td class="px-6 py-4 whitespace-nowrap text-gray-300">${followersFormatted}</td>
                     <td class="px-6 py-4 whitespace-nowrap text-gray-300">${artist.popularity}</td>
                     <td class="px-6 py-4 whitespace-nowrap">
-                        <a href="${searchUrl}" target="_blank" class="bg-gray-700 hover:bg-gray-600 text-white text-xs font-bold py-1 px-3 rounded border border-gray-600">
-                            Search Contact 🔍
+                        <a href="${searchUrl}" target="_blank" class="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold py-2 px-4 rounded border border-blue-500 transition shadow">
+                            Find Email 📧
                         </a>
                     </td>
                 `;
