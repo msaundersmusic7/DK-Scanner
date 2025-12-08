@@ -18,7 +18,12 @@ logging.basicConfig(level=logging.DEBUG)
 # --- Configuration ---
 CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
-MAX_FOLLOWERS = 100000
+
+# FILTER SETTINGS
+MAX_FOLLOWERS = 100000     
+MIN_POPULARITY = 2         
+REQUIRE_IMAGE = True       
+REQUIRE_GENRE = True       
 
 # Regex: Matches "Records DK" or "DK <number>"
 P_LINE_REGEX = re.compile(r"(records\s+dk|dk\s+\d+)", re.IGNORECASE)
@@ -29,15 +34,12 @@ token_info = {
     'expires_at': 0
 }
 
-# --- Session for Connection Pooling ---
-# Improves speed by keeping the TCP connection to Spotify open
 spotify_session = requests.Session()
 
 def get_spotify_token():
     global token_info
     now = time.time()
     
-    # Return cached token if still valid (with 60s buffer)
     if token_info['access_token'] and token_info['expires_at'] > now + 60:
         return token_info['access_token']
 
@@ -61,10 +63,7 @@ def get_spotify_token():
         json_data = response.json()
         
         token_info['access_token'] = json_data.get('access_token')
-        # Expires in usually 3600 seconds
         token_info['expires_at'] = now + json_data.get('expires_in', 3600)
-        
-        app.logger.info("Generated new Spotify Access Token")
         return token_info['access_token']
     except Exception as e:
         app.logger.error(f"Auth Error: {e}")
@@ -78,12 +77,10 @@ def make_spotify_request(url, params=None):
     try:
         response = spotify_session.get(url, headers=headers, params=params)
         
-        # Handle Rate Limiting
         if response.status_code == 429:
             retry_after = int(response.headers.get('Retry-After', 5))
-            app.logger.warning(f"Rate limited. Sleeping {retry_after}s")
             time.sleep(retry_after)
-            return make_spotify_request(url, params) # Retry
+            return make_spotify_request(url, params)
             
         response.raise_for_status()
         return response.json()
@@ -91,43 +88,70 @@ def make_spotify_request(url, params=None):
         app.logger.error(f"Request Error ({url}): {e}")
         return None
 
-def check_copyright_string(album):
-    """Checks if any C or P line matches the target regex."""
-    for copyright in album.get('copyrights', []):
-        # FIX: Check both 'P' and 'C' types
+def check_copyright_match(album, artist_name=None):
+    """
+    Checks if any C or P line matches:
+    1. The 'Records DK' regex
+    2. The artist's name (if provided)
+    """
+    copyrights = album.get('copyrights', [])
+    if not copyrights:
+        return False
+
+    for copyright in copyrights:
         if copyright.get('type') in ['P', 'C']:
-            text = copyright.get('text', '')
+            text = copyright.get('text', '').lower()
+            
+            # 1. Check for Records DK
             if P_LINE_REGEX.search(text):
                 return True
+            
+            # 2. Check for Artist Name (if provided)
+            # We look for the artist name inside the copyright text
+            if artist_name:
+                # Basic check: is "artist name" inside "text"?
+                # e.g. Artist: "Russ", Text: "DIEMON/Russ" -> Match
+                if artist_name.lower() in text:
+                    return True
+                    
     return False
 
-def verify_artist_latest_release(artist_id):
+def is_quality_candidate(artist_obj):
+    if REQUIRE_IMAGE:
+        images = artist_obj.get('images', [])
+        if not images: return False
+
+    if REQUIRE_GENRE:
+        genres = artist_obj.get('genres', [])
+        if not genres: return False
+
+    if artist_obj.get('popularity', 0) < MIN_POPULARITY:
+        return False
+        
+    return True
+
+def verify_artist_latest_release(artist_id, artist_name):
     """
-    Fetches the artist's albums, sorts by date, and checks if the 
-    absolute newest release matches the target label.
+    Fetches artist's albums, sorts by date.
+    Checks if the NEWEST release matches 'Records DK' OR 'Artist Name'.
     """
     url = f"https://api.spotify.com/v1/artists/{artist_id}/albums"
-    # Fetch singles and albums to be sure
     params = {'include_groups': 'album,single', 'limit': 10, 'market': 'US'}
     
     data = make_spotify_request(url, params)
-    if not data: return False
+    if not data or not data.get('items'): return False
     
     items = data.get('items', [])
-    if not items: return False
-    
-    # Sort by release_date descending (newest first)
-    # Spotify dates can be 'YYYY', 'YYYY-MM', or 'YYYY-MM-DD'
+    # Sort by release_date descending
     items.sort(key=lambda x: x.get('release_date', '0000'), reverse=True)
     
-    # Get the ID of the absolute newest release
     latest_album_id = items[0].get('id')
     
-    # We need to fetch full details for this specific album to see the copyright
+    # Check Copyright of the latest album
     album_details_url = f"https://api.spotify.com/v1/albums/{latest_album_id}"
     full_album = make_spotify_request(album_details_url)
     
-    if full_album and check_copyright_string(full_album):
+    if full_album and check_copyright_match(full_album, artist_name):
         return True
         
     return False
@@ -137,7 +161,7 @@ def scan_one_page():
     data = request.get_json()
     artists_already_found = set(data.get('artists_already_found', []))
     
-    # 1. Random Search for Recent Albums
+    # 1. Random Search
     current_year = datetime.datetime.now().year
     char1 = random.choice(string.ascii_lowercase)
     char2 = random.choice(string.ascii_lowercase)
@@ -150,12 +174,10 @@ def scan_one_page():
     
     if not search_data: return jsonify({"artists": []})
     
-    # Collect Album IDs
     album_ids = [item['id'] for item in search_data.get('albums', {}).get('items', []) if item]
     if not album_ids: return jsonify({"artists": []})
 
-    # 2. Batch Fetch Album Details (to see Copyrights)
-    # We split into chunks of 20
+    # 2. Batch Fetch Album Details
     candidate_artists = {}
     
     for i in range(0, len(album_ids), 20):
@@ -170,13 +192,18 @@ def scan_one_page():
         for album in details_data.get('albums', []):
             if not album: continue
             
-            # Initial Check: Does THIS random album match?
-            if check_copyright_string(album):
-                for artist in album.get('artists', []):
-                    aid = artist.get('id')
-                    if aid and aid not in artists_already_found:
+            # Check global "Records DK" match first (saves time)
+            has_dk_match = check_copyright_match(album, artist_name=None)
+            
+            for artist in album.get('artists', []):
+                aid = artist.get('id')
+                name = artist.get('name')
+                
+                if aid and name and aid not in artists_already_found:
+                    # If the album matches DK regex, OR this specific artist's name is in the copyright
+                    if has_dk_match or check_copyright_match(album, artist_name=name):
                         candidate_artists[aid] = {
-                            'name': artist.get('name'),
+                            'name': name,
                             'url': artist.get('external_urls', {}).get('spotify')
                         }
 
@@ -184,12 +211,7 @@ def scan_one_page():
         return jsonify({"artists": []})
 
     # 3. Validation Phase
-    # We found candidates, but we must verify they satisfy the "Most Recent" rule
-    # and the "Follower Count" rule.
-    
     final_artists = []
-    
-    # Fetch Artist Details (for follower count)
     artist_ids = list(candidate_artists.keys())
     
     for i in range(0, len(artist_ids), 50):
@@ -207,14 +229,14 @@ def scan_one_page():
             aid = artist_obj.get('id')
             followers = artist_obj.get('followers', {}).get('total', 0)
             
-            if followers < MAX_FOLLOWERS:
-                # HEAVY CHECK: Only do this if they pass the follower filter
-                # Verify their *actual* latest release matches
-                if verify_artist_latest_release(aid):
-                    base_info = candidate_artists[aid]
+            if followers < MAX_FOLLOWERS and is_quality_candidate(artist_obj):
+                
+                # Pass the artist name to verify the latest release
+                name = candidate_artists[aid]['name']
+                if verify_artist_latest_release(aid, name):
                     final_artists.append({
-                        "name": base_info['name'],
-                        "url": base_info['url'],
+                        "name": name,
+                        "url": candidate_artists[aid]['url'],
                         "followers": followers,
                         "popularity": artist_obj.get('popularity', 0),
                         "id": aid
