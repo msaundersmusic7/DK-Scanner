@@ -275,4 +275,7 @@ def serve_frontend():
         return "Error: spotify_scanner.html not found.", 404
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    # Get the PORT from Render's environment variables (default to 5000 locally)
+    port = int(os.environ.get("PORT", 5000))
+    # host='0.0.0.0' is required for the app to be visible to Render
+    app.run(host='0.0.0.0', port=port)
