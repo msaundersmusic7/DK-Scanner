@@ -19,13 +19,10 @@ CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
 # --- SETTINGS ---
-MAX_FOLLOWERS = 150000      # Increased to ensure we don't filter out rising stars
+# Lowered max followers to target true indies/startups
+MAX_FOLLOWERS = 50000      
 REQUIRE_IMAGE = True        
-BLOCKED_KEYWORDS = ["white noise", "sleep", "lullaby", "rain sounds", "meditation", "frequency"]
-
-# Regex for "Records DK", "DistroKid", and variations
-# Matches: "Records DK", "RecordsDK", "DK 1234", "DistroKid"
-P_LINE_REGEX = re.compile(r"(records\s*dk|dk\s*\d+|distrokid)", re.IGNORECASE)
+BLOCKED_KEYWORDS = ["white noise", "sleep", "lullaby", "rain sounds", "meditation", "frequency", "karaoke", "tribute"]
 
 # --- Token Management ---
 token_info = {'access_token': None, 'expires_at': 0}
@@ -65,10 +62,12 @@ def make_request(url, token, params=None):
     try:
         response = spotify_session.get(url, headers=headers, params=params, timeout=10)
         if response.status_code == 429:
+            app.logger.warning("Rate limit hit (429).")
             return None 
         response.raise_for_status()
         return response.json()
-    except Exception:
+    except Exception as e:
+        # app.logger.error(f"Request failed: {e}")
         return None
 
 def clean_name_for_match(name):
@@ -81,23 +80,33 @@ def check_copyright_match(album, artist_name):
     """
     Returns True if:
     1. 'Records DK' / 'DistroKid' is in the text.
-    2. The Artist's name is inside the copyright text.
+    2. The Artist's name is inside the copyright text (Common for DistroKid).
     """
     artist_clean = clean_name_for_match(artist_name)
     
+    # Regex to catch explicit DistroKid markers
+    # Matches: "Records DK", "DistroKid.com", "DistroKid", "DK"
+    dk_regex = re.compile(r"(records\s*dk|distrokid|dk\s*\d+)", re.IGNORECASE)
+
     for copyright in album.get('copyrights', []):
-        if copyright.get('type') in ['P', 'C']:
-            text = copyright.get('text', '').lower()
-            text_clean = re.sub(r'[^a-z0-9]', '', text) 
-            
-            # 1. Regex Match (Records DK)
-            if P_LINE_REGEX.search(text): 
+        text = copyright.get('text', '').lower()
+        
+        # 1. Check for explicit DistroKid string
+        if dk_regex.search(text): 
+            # app.logger.info(f"MATCH (Explicit DK): {text}")
+            return True
+        
+        # 2. Check for Artist Name match (Self-released via DK often looks like this)
+        # We strip special chars to match "The Band!" with "2024 The Band"
+        text_clean = re.sub(r'[^a-z0-9]', '', text)
+        
+        # Security check: Ensure artist name isn't too short to avoid false positives
+        if len(artist_clean) >= 3 and artist_clean in text_clean:
+            # Verify it's not a major label owned copyright by checking for major keywords
+            if "sony" not in text and "universal" not in text and "warner" not in text:
+                # app.logger.info(f"MATCH (Name Match): {artist_name} in {text}")
                 return True
-            
-            # 2. Name Match (e.g. "© 2025 Band Name" matches "Band Name")
-            # We enforce a min length of 3 to avoid matching "Ra" or "X"
-            if len(artist_clean) >= 3 and artist_clean in text_clean:
-                return True
+                
     return False
 
 def is_real_artist_name(name):
@@ -114,39 +123,27 @@ def scan_one_page():
     
     data = request.get_json()
     artists_already_found = set(data.get('artists_already_found', []))
-    page_index = data.get('page_index', 0)
     
     final_results = []
     
-    # === FAIL-SAFE LOOP ===
-    # We will try up to 3 different strategies/pages per request to ensure we find results.
-    # If Strategy A (tag:new) yields 0 results, we immediately try Strategy B.
-    
+    # We try 3 random searches to find gold
     for attempt in range(3):
-        if len(final_results) >= 5: break # If we have enough results, stop.
+        if len(final_results) >= 5: break
 
-        # --- STRATEGY SELECTION ---
+        # --- STRATEGY: RANDOMIZED DEEP DIVE ---
+        # We pick a random character (e.g., 'a') and a random offset.
+        # This bypasses the "Popular" filter that blocks indie artists.
+        char = random.choice(string.ascii_lowercase)
         
-        # Strategy A: Use 'tag:new' (The Goldmine)
-        # We cycle the offset 0-950 based on page_index to respect the 1000 limit.
-        if attempt == 0:
-            query = 'tag:new'
-            # Loop offset 0 -> 950. If page_index is 20, offset is 1000 (limit). 
-            # We wrap around using modulo: (20 * 50) % 1000 = 0
-            offset = (page_index * 50) % 1000 
-            market = 'US'
-            
-        # Strategy B: Random Character + Current Year (The Fallback)
-        # If Strategy A failed (or we looped), we pick a random letter to find hidden gems.
-        else:
-            char = random.choice(string.ascii_lowercase)
-            query = f"{char}* year:2024-2025"
-            offset = random.randint(0, 900)
-            market = 'US'
+        # Use wildcard search + current years to find active artists
+        query = f"{char}* year:2024-2025" 
+        
+        # Random offset (0-950) ensures we don't just get the most popular matches for 'a'
+        offset = random.randint(0, 950) 
+        
+        app.logger.info(f"Scanning: Query='{query}' Offset={offset}")
 
-        app.logger.info(f"Attempt {attempt}: Query='{query}' Offset={offset}")
-
-        # 1. Perform Search
+        # 1. Search for Albums
         search_data = make_request(
             'https://api.spotify.com/v1/search', token,
             {
@@ -154,20 +151,21 @@ def scan_one_page():
                 'type': 'album', 
                 'limit': 50, 
                 'offset': offset, 
-                'market': market
+                'market': 'US' 
             }
         )
         
         if not search_data: continue
         
         raw_albums = search_data.get('albums', {}).get('items', [])
-        if not raw_albums: continue
+        if not raw_albums: 
+            app.logger.info("No albums returned from search.")
+            continue
         
-        # 2. Get Album Details (to check Copyrights)
+        # 2. Get Album Details (Copyrights are NOT in search results, must fetch details)
         album_ids = [alb['id'] for alb in raw_albums if alb and alb.get('id')]
         candidates = {} 
         
-        # Chunk into groups of 20 (Spotify API limit for IDs)
         for i in range(0, len(album_ids), 20):
             chunk = album_ids[i:i+20]
             details = make_request('https://api.spotify.com/v1/albums', token, {'ids': ','.join(chunk)})
@@ -176,21 +174,25 @@ def scan_one_page():
             for album in details.get('albums', []):
                 if not album: continue
                 
-                for artist in album.get('artists', []):
-                    aid = artist.get('id')
-                    name = artist.get('name')
-                    
-                    if aid and name and aid not in artists_already_found and is_real_artist_name(name):
-                        # CRITICAL CHECK: Does copyright match DK or Artist Name?
-                        if check_copyright_match(album, name):
-                            candidates[aid] = {
-                                'name': name,
-                                'url': artist.get('external_urls', {}).get('spotify')
-                            }
+                # Check Copyrights FIRST (Efficiency)
+                # We check matches against the FIRST artist on the album
+                if not album.get('artists'): continue
+                primary_artist = album['artists'][0]
+                name = primary_artist.get('name')
+                aid = primary_artist.get('id')
+
+                if is_real_artist_name(name) and check_copyright_match(album, name):
+                     if aid not in artists_already_found:
+                        candidates[aid] = {
+                            'name': name,
+                            'url': primary_artist.get('external_urls', {}).get('spotify')
+                        }
+                # else:
+                #    app.logger.info(f"Failed Copyright/Name Check: {name} | {album.get('copyrights')}")
 
         if not candidates: continue
 
-        # 3. Get Artist Profiles (to check Followers/Image)
+        # 3. Get Artist Profiles (Check Followers)
         artist_ids = list(candidates.keys())
         for i in range(0, len(artist_ids), 50):
             chunk = artist_ids[i:i+50]
@@ -200,21 +202,30 @@ def scan_one_page():
             for a_obj in adata.get('artists', []):
                 if not a_obj: continue
                 
-                if REQUIRE_IMAGE and not a_obj.get('images'): continue
-                if a_obj.get('followers', {}).get('total', 0) > MAX_FOLLOWERS: continue
+                followers = a_obj.get('followers', {}).get('total', 0)
+                
+                # FILTER: Followers
+                if followers > MAX_FOLLOWERS:
+                    # app.logger.info(f"REJECTED {a_obj['name']}: Too many followers ({followers})")
+                    continue
+
+                # FILTER: Image
+                if REQUIRE_IMAGE and not a_obj.get('images'):
+                    # app.logger.info(f"REJECTED {a_obj['name']}: No image")
+                    continue
                 
                 aid = a_obj.get('id')
                 if aid in candidates:
+                    app.logger.info(f"SUCCESS: Found {candidates[aid]['name']} ({followers} followers)")
                     final_results.append({
                         "name": candidates[aid]['name'],
                         "url": candidates[aid]['url'],
-                        "followers": a_obj.get('followers', {}).get('total', 0),
+                        "followers": followers,
                         "popularity": a_obj.get('popularity', 0),
                         "id": aid
                     })
                     artists_already_found.add(aid)
 
-    app.logger.info(f"Found {len(final_results)} artists in {page_index}.")
     return jsonify({"artists": final_results})
 
 @app.route('/')
@@ -223,7 +234,10 @@ def serve_frontend():
         with open('spotify_scanner.html', 'r', encoding='utf-8') as f:
             return make_response(f.read())
     except FileNotFoundError:
-        return "Error: frontend not found", 404
+        return "Error: spotify_scanner.html not found. Please upload it.", 404
 
 if __name__ == '__main__':
+    # Ensure you set these in your environment!
+    # export SPOTIFY_CLIENT_ID="your_id"
+    # export SPOTIFY_CLIENT_SECRET="your_secret"
     app.run(debug=True, port=5000)
