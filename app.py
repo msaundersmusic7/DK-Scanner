@@ -20,14 +20,20 @@ CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
 # --- REFINEMENT SETTINGS ---
-MAX_FOLLOWERS = 50000      # Lowered slightly to target more reachable indie artists
-MIN_POPULARITY = 5         # Bumped to 5 to avoid "ghost" accounts
+MAX_FOLLOWERS = 50000      
+MIN_POPULARITY = 5         
 REQUIRE_IMAGE = True       
 REQUIRE_GENRE = True       
+MIN_RELEASES = 2           
+DAYS_WINDOW = 90           
 
-# NEW: Strict Activity Filters
-MIN_RELEASES = 2           # Artist must have at least 2 items (Single/Album)
-DAYS_WINDOW = 90           # Latest release must be within 90 days
+# --- NEW: Anti-Bot / Anti-Spam Keywords ---
+# If an artist name contains these, they are likely "Functional Music" (bots), not bands.
+BLOCKED_KEYWORDS = [
+    "sleep", "relax", "meditation", "lullaby", "noise", "rain", 
+    "nature", "sounds", "therapy", "yoga", "spa", "study", "beats", 
+    "lofi", "chill", "focus", "binaural", "frequencies", "baby"
+]
 
 # Regex: Matches "Records DK" or "DK <number>"
 P_LINE_REGEX = re.compile(r"(records\s+dk|dk\s+\d+)", re.IGNORECASE)
@@ -86,6 +92,14 @@ def check_copyright_match(album, artist_name=None):
             if artist_name and artist_name.lower() in text: return True
     return False
 
+def is_real_artist_name(name):
+    """Checks if the name contains 'bot' keywords."""
+    name_lower = name.lower()
+    for word in BLOCKED_KEYWORDS:
+        if word in name_lower:
+            return False
+    return True
+
 def is_quality_candidate(artist_obj):
     # 1. Image Check
     if REQUIRE_IMAGE and not artist_obj.get('images'): return False
@@ -93,15 +107,12 @@ def is_quality_candidate(artist_obj):
     if REQUIRE_GENRE and not artist_obj.get('genres'): return False
     # 3. Popularity Check
     if artist_obj.get('popularity', 0) < MIN_POPULARITY: return False
+    # 4. Name Check (Anti-Bot)
+    if not is_real_artist_name(artist_obj.get('name', '')): return False
+    
     return True
 
 def verify_artist_activity(artist_id, artist_name):
-    """
-    Checks:
-    1. Total release count >= MIN_RELEASES
-    2. Latest release is within DAYS_WINDOW
-    3. Latest release matches copyright criteria
-    """
     url = f"https://api.spotify.com/v1/artists/{artist_id}/albums"
     params = {'include_groups': 'album,single', 'limit': 20, 'market': 'US'}
     
@@ -110,29 +121,22 @@ def verify_artist_activity(artist_id, artist_name):
     
     items = data.get('items', [])
     
-    # FILTER: Catalog Depth
-    if len(items) < MIN_RELEASES:
-        return False
+    if len(items) < MIN_RELEASES: return False
 
-    # Sort by release_date descending
     items.sort(key=lambda x: x.get('release_date', '0000'), reverse=True)
     latest_release = items[0]
     
-    # FILTER: Recency
     release_date_str = latest_release.get('release_date', '2000-01-01')
     try:
-        # Handle YYYY, YYYY-MM, or YYYY-MM-DD
         if len(release_date_str) == 4: release_date = datetime.datetime.strptime(release_date_str, "%Y")
         elif len(release_date_str) == 7: release_date = datetime.datetime.strptime(release_date_str, "%Y-%m")
         else: release_date = datetime.datetime.strptime(release_date_str, "%Y-%m-%d")
         
-        days_diff = (datetime.datetime.now() - release_date).days
-        if days_diff > DAYS_WINDOW:
-            return False # Too old
+        if (datetime.datetime.now() - release_date).days > DAYS_WINDOW:
+            return False 
     except ValueError:
         return False
 
-    # FILTER: Copyright Match on LATEST release
     album_details_url = f"https://api.spotify.com/v1/albums/{latest_release['id']}"
     full_album = make_spotify_request(album_details_url)
     
@@ -146,7 +150,6 @@ def scan_one_page():
     data = request.get_json()
     artists_already_found = set(data.get('artists_already_found', []))
     
-    # 1. Random Search (Current Year)
     current_year = datetime.datetime.now().year
     char1 = random.choice(string.ascii_lowercase)
     char2 = random.choice(string.ascii_lowercase)
@@ -161,7 +164,6 @@ def scan_one_page():
     album_ids = [item['id'] for item in search_data.get('albums', {}).get('items', []) if item]
     if not album_ids: return jsonify({"artists": []})
 
-    # 2. Batch Fetch Album Details
     candidate_artists = {}
     for i in range(0, len(album_ids), 20):
         chunk = album_ids[i:i+20]
@@ -176,12 +178,13 @@ def scan_one_page():
                 aid = artist.get('id')
                 name = artist.get('name')
                 if aid and name and aid not in artists_already_found:
-                    if has_dk_match or check_copyright_match(album, artist_name=name):
-                        candidate_artists[aid] = {'name': name, 'url': artist.get('external_urls', {}).get('spotify')}
+                    # Filter bad names EARLY to save processing
+                    if is_real_artist_name(name):
+                        if has_dk_match or check_copyright_match(album, artist_name=name):
+                            candidate_artists[aid] = {'name': name, 'url': artist.get('external_urls', {}).get('spotify')}
 
     if not candidate_artists: return jsonify({"artists": []})
 
-    # 3. Validation Phase
     final_artists = []
     artist_ids = list(candidate_artists.keys())
     
@@ -195,10 +198,8 @@ def scan_one_page():
             aid = artist_obj.get('id')
             followers = artist_obj.get('followers', {}).get('total', 0)
             
-            # Apply all filters
             if followers < MAX_FOLLOWERS and is_quality_candidate(artist_obj):
                 name = candidate_artists[aid]['name']
-                # Heavy check (Release counts, dates)
                 if verify_artist_activity(aid, name):
                     final_artists.append({
                         "name": name,
