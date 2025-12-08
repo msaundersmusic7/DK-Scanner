@@ -5,7 +5,8 @@ import random
 import string
 import re
 import datetime 
-from flask import Flask, jsonify, request
+# --- FIX IS HERE: Added 'make_response' back to imports ---
+from flask import Flask, jsonify, request, make_response
 from flask_cors import CORS
 import requests
 import logging
