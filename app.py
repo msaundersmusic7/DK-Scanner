@@ -17,16 +17,24 @@ CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
 # --- SETTINGS ---
-MAX_FOLLOWERS = 300000 
+MAX_FOLLOWERS = 200000 
 REQUIRE_IMAGE = True
 
-# BLACKLIST: Immediate disqualification if found in ANY copyright line
+# BLACKLIST: Immediate rejection if found in copyright
 MAJOR_LABELS = [
     "sony", "universal", "umg", "warner", "atlantic", "columbia", "rca", 
     "interscope", "capitol", "republic", "def jam", "elektra", 
     "island records", "arista", "epic", "bad boy", "cash money", 
     "roc nation", "aftermath", "shady", "young money", "concord", "bmg",
-    "kobalt", "ada", "300 entertainment", "empire", "utg", "create music group"
+    "kobalt", "ada", "300 entertainment", "empire", "utg", "create music group",
+    "distributor", "distribution", "records dk2" 
+]
+
+# ALLOWED SUFFIXES: Words that independent artists often add to their name in copyrights
+# e.g. "Artist Name LLC" or "Artist Name Productions"
+ALLOWED_SUFFIXES = [
+    "records", "music", "entertainment", "llc", "inc", "productions", 
+    "band", "group", "collective", "ent", "official", "publishing", "ltd"
 ]
 
 # --- Auth & Session ---
@@ -35,8 +43,7 @@ spotify_session = requests.Session()
 adapter = requests.adapters.HTTPAdapter(pool_connections=5, pool_maxsize=5)
 spotify_session.mount('https://', adapter)
 
-# THROTTLE: Safety delay
-MIN_REQUEST_INTERVAL = 0.2 
+MIN_REQUEST_INTERVAL = 0.15 # Slightly faster throttle
 last_request_time = 0
 
 def get_spotify_token():
@@ -49,7 +56,6 @@ def get_spotify_token():
         app.logger.error("CRITICAL: Missing credentials.")
         return None
 
-    # STANDARD API URL
     auth_url = 'https://accounts.spotify.com/api/token'
     auth_string = f"{CLIENT_ID}:{CLIENT_SECRET}"
     auth_base64 = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
@@ -72,7 +78,6 @@ def make_request(url, token, params=None):
     headers = {"Authorization": f"Bearer {token}"}
     
     for attempt in range(3):
-        # Throttle
         now = time.time()
         elapsed = now - last_request_time
         if elapsed < MIN_REQUEST_INTERVAL:
@@ -82,103 +87,101 @@ def make_request(url, token, params=None):
             last_request_time = time.time()
             response = spotify_session.get(url, headers=headers, params=params, timeout=10)
             
-            # Rate Limit Handling
             if response.status_code == 429:
                 retry_after = int(response.headers.get('Retry-After', 5)) + 1
                 if retry_after > 60:
-                    app.logger.error(f"LONG BAN ({retry_after}s). Aborting.")
                     return None 
-                app.logger.warning(f"Rate limit hit. Sleeping {retry_after}s...")
                 time.sleep(retry_after)
                 continue
             
             if response.status_code == 200:
                 return response.json()
-            
             return None
-            
-        except Exception as e:
-            app.logger.error(f"Connection error: {e}")
+        except Exception:
             time.sleep(1)
-    
     return None
 
-def check_copyright_match(album, artist_name):
+def normalize_text(text):
+    if not text: return ""
+    clean = text.lower().strip()
+    if clean.startswith("the "): clean = clean[4:]
+    return re.sub(r'[^a-z0-9]', '', clean)
+
+def check_copyright_match(album, artist_name, debug=False):
     """
-    STRICT MODE:
-    1. Scan ALL lines for Major Labels -> Reject.
-    2. Check for 'Records DK' or Exact Artist Name -> Accept.
+    STRICT MODE VALIDATION
+    debug=True will print why it failed.
     """
     if not artist_name: return False
     
     copyrights = [c.get('text', '').lower() for c in album.get('copyrights', []) if c.get('text')]
-    if not copyrights: return False
+    if not copyrights: 
+        if debug: print(f"   [REJECT] {artist_name}: No copyright data found.")
+        return False
 
-    # STEP 1: The Purge (Major Labels)
+    # 1. THE BLACKLIST
     for text in copyrights:
-        if any(major in text for major in MAJOR_LABELS):
-            return False
+        for major in MAJOR_LABELS:
+            if major in text:
+                if debug: print(f"   [REJECT] {artist_name}: Major label '{major}' found in '{text}'")
+                return False
 
-    # STEP 2: The Match
-    artist_clean = re.sub(r'[^a-z0-9]', '', artist_name.lower())
-    if artist_clean.startswith("the"): artist_clean = artist_clean[3:] # Remove "the" strict
-    
+    # 2. THE MATCH
+    artist_clean = normalize_text(artist_name)
     dk_regex = re.compile(r"(records\s*dk|distrokid|dk\s*\d+)", re.IGNORECASE)
 
     for text in copyrights:
         # Match A: DistroKid
         if dk_regex.search(text):
+            if debug: print(f"   [MATCH] {artist_name}: 'Records DK' found in '{text}'")
             return True
             
-        # Match B: Exact Artist Name
-        # Remove years (2025) and symbols
+        # Match B: Exact Artist Name (with smart suffix tolerance)
         text_no_year = re.sub(r'\d{4}', '', text) 
-        text_clean = re.sub(r'[^a-z0-9]', '', text_no_year)
+        text_clean = normalize_text(text_no_year)
         
-        # Strict equality check
+        # Exact match
         if artist_clean == text_clean:
+            if debug: print(f"   [MATCH] {artist_name}: Exact match '{text}'")
             return True
             
-        # Allow standard suffixes if strictly attached
+        # Suffix match (e.g. "Artist LLC")
         if text_clean.startswith(artist_clean):
             suffix = text_clean[len(artist_clean):]
-            if suffix in ["records", "music", "entertainment", "llc", "inc", "productions", "band", "group"]:
+            if suffix in ALLOWED_SUFFIXES:
+                if debug: print(f"   [MATCH] {artist_name}: Suffix match '{text}'")
                 return True
                 
+    if debug: print(f"   [REJECT] {artist_name}: Copyright '{copyrights[0]}' != '{artist_clean}'")
     return False
 
-def get_latest_release_copyrights(artist_id, token, original_artist_name):
-    """
-    Fetches the artist's discography, sorts by date, 
-    and checks copyrights of the absolute latest release.
-    """
-    # 1. Get Discography (Albums & Singles)
-    # We fetch 20 items to be safe
+def get_latest_release_check(artist_id, token, original_artist_name):
+    # 1. Fetch Latest Release
     url = f"https://api.spotify.com/v1/artists/{artist_id}/albums"
-    data = make_request(url, token, {'include_groups': 'album,single', 'limit': 20, 'market': 'US'})
+    # limit=5 is enough to find the latest
+    data = make_request(url, token, {'include_groups': 'album,single', 'limit': 5, 'market': 'US'})
     
-    if not data: return False
+    if not data or not data.get('items'): return False, None
     
-    items = data.get('items', [])
-    if not items: return False
+    # Sort by date
+    items = data.get('items')
+    sorted_items = sorted([i for i in items if i.get('release_date')], key=lambda x: x.get('release_date'), reverse=True)
+    if not sorted_items: return False, None
     
-    # 2. Sort by Release Date (Newest First)
-    # Date format can be '2025-01-01' or '2025'. String sort works reasonably well for ISO dates.
-    sorted_items = sorted(items, key=lambda x: x.get('release_date', '0000'), reverse=True)
-    latest_album_summary = sorted_items[0]
-    latest_id = latest_album_summary.get('id')
+    latest_release = sorted_items[0]
     
-    if not latest_id: return False
-    
-    # 3. Get Full Details of Latest Release (to see Copyrights)
-    details_url = f"https://api.spotify.com/v1/albums/{latest_id}"
+    # 2. Check details
+    details_url = f"https://api.spotify.com/v1/albums/{latest_release['id']}"
     album_details = make_request(details_url, token)
+    if not album_details: return False, None
     
-    if not album_details: return False
+    # 3. Verify
+    # print(f"   -> Verifying Latest: {latest_release['name']} ({latest_release['release_date']})")
+    match = check_copyright_match(album_details, original_artist_name, debug=False) # Keep debug False here to reduce noise
     
-    # 4. Check Copyrights on this latest release
-    # app.logger.info(f"   -> Auditing Latest Release: {album_details.get('name')} ({album_details.get('release_date')})")
-    return check_copyright_match(album_details, original_artist_name)
+    if match:
+        return True, latest_release.get('external_urls', {}).get('spotify')
+    return False, None
 
 @app.route('/api/scan_one_page', methods=['POST'])
 def scan_one_page():
@@ -190,17 +193,19 @@ def scan_one_page():
     
     final_results = []
     attempts = 0
-    max_attempts = 15 
     
-    while len(final_results) < 5 and attempts < max_attempts:
+    # We will search aggressively until we find artists
+    max_search_attempts = 50 
+    
+    while len(final_results) < 5 and attempts < max_search_attempts:
         attempts += 1
         
+        # Focus purely on 2025/2024 for "Most Recent" relevance
         offset = random.randint(0, 950)
-        query = "year:2024-2025" 
+        query = "year:2024-2025"
         
-        app.logger.info(f"Scanning [Attempt {attempts}]: Offset {offset}...")
+        app.logger.info(f"--- SEARCHING PAGE {attempts} (Offset {offset}) ---")
 
-        # 1. SEARCH (Broad Sweep)
         search_data = make_request(
             'https://api.spotify.com/v1/search', 
             token, 
@@ -209,12 +214,15 @@ def scan_one_page():
         if not search_data: continue
         
         raw_albums = search_data.get('albums', {}).get('items', [])
-        if not raw_albums: continue
+        if not raw_albums: 
+            app.logger.info("   -> Empty page.")
+            continue
         
+        # Batch Fetch IDs
         album_ids = [alb['id'] for alb in raw_albums if alb and alb.get('id')]
-        candidates_step1 = {} 
+        potential_candidates = {}
         
-        # 2. INITIAL FILTER (Check found album)
+        # Check initial batch
         for i in range(0, len(album_ids), 20):
             chunk = album_ids[i:i+20]
             details = make_request('https://api.spotify.com/v1/albums', token, {'ids': ','.join(chunk)})
@@ -222,63 +230,58 @@ def scan_one_page():
             
             for album in details.get('albums', []):
                 if not album or not album.get('artists'): continue
+                
                 primary_artist = album['artists'][0]
                 aid = primary_artist.get('id')
                 name = primary_artist.get('name')
-
+                
                 if aid in artists_already_found: continue
+                if aid in potential_candidates: continue 
                 
-                # STEP 1: Fast Check
-                if check_copyright_match(album, name):
-                    candidates_step1[aid] = name
+                # DEBUG: Print failures for the first few attempts so user sees logic
+                # Only print first 2 items per batch to avoid flooding
+                debug_flag = (len(potential_candidates) < 1) 
+                
+                if check_copyright_match(album, name, debug=debug_flag):
+                    potential_candidates[aid] = name
 
-        if not candidates_step1: continue
-
-        # 3. DEEP VERIFICATION (Check Latest Release)
-        # Only verify the survivors of Step 1
-        verified_candidates = {}
+        if not potential_candidates: 
+            app.logger.info("   -> No matches on this page.")
+            continue
         
-        for aid, name in candidates_step1.items():
-            # Throttle slightly
-            time.sleep(0.1)
-            
-            # CALL THE NEW FUNCTION
-            if get_latest_release_copyrights(aid, token, name):
-                verified_candidates[aid] = name
-            else:
-                # app.logger.info(f"   -> {name} FAILED Latest Release Check.")
-                pass
+        app.logger.info(f"   -> Found {len(potential_candidates)} potential candidates. Verifying latest releases...")
 
-        if not verified_candidates: continue
-
-        # 4. FINAL DETAILS (Followers)
-        artist_ids = list(verified_candidates.keys())
-        for i in range(0, len(artist_ids), 50):
-            chunk = artist_ids[i:i+50]
-            adata = make_request('https://api.spotify.com/v1/artists', token, {'ids': ','.join(chunk)})
-            if not adata: continue
+        # Verify Latest Releases
+        for aid, name in potential_candidates.items():
+            if len(final_results) >= 5: break
             
-            for a_obj in adata.get('artists', []):
-                if not a_obj: continue
-                followers = a_obj.get('followers', {}).get('total', 0)
+            is_valid, spotify_url = get_latest_release_check(aid, token, name)
+            
+            if is_valid:
+                # Get Artist Profile
+                artist_data = make_request(f"https://api.spotify.com/v1/artists/{aid}", token)
+                if not artist_data: continue
                 
-                if followers > MAX_FOLLOWERS: continue
-                if REQUIRE_IMAGE and not a_obj.get('images'): continue
+                followers = artist_data.get('followers', {}).get('total', 0)
                 
-                aid = a_obj.get('id')
-                if aid in verified_candidates:
-                    app.logger.info(f"MATCH: {verified_candidates[aid]} ({followers} followers)")
+                if followers <= MAX_FOLLOWERS:
+                    if REQUIRE_IMAGE and not artist_data.get('images'): continue
+                    
+                    app.logger.info(f"SUCCESS: {name} ({followers} flwrs) - {spotify_url}")
                     final_results.append({
-                        "name": verified_candidates[aid],
-                        "url": a_obj.get('external_urls', {}).get('spotify'),
+                        "name": name,
+                        "url": artist_data.get('external_urls', {}).get('spotify'),
                         "followers": followers,
-                        "popularity": a_obj.get('popularity', 0),
+                        "popularity": artist_data.get('popularity', 0),
                         "id": aid
                     })
                     artists_already_found.add(aid)
+            else:
+                 # If they failed the "Latest Release" check, it means they might have signed recently
+                 # app.logger.info(f"   -> {name} FAILED Latest Release Check.")
+                 pass
 
-            if len(final_results) >= 10: break
-
+    app.logger.info(f"Scan complete. Found {len(final_results)} artists.")
     return jsonify({"artists": final_results})
 
 @app.route('/')
